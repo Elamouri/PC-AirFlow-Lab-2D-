@@ -10,8 +10,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Elamouri/PC-AirFlow-Lab-2D-/releases/latest/download/PC_Airflow_Lab.exe"><img alt="Download PC_Airflow_Lab.exe for Windows" src="https://img.shields.io/badge/Download-PC__Airflow__Lab.exe-2ea44f?style=for-the-badge&logo=windows&logoColor=white"></a>
-  <a href="https://github.com/Elamouri/PC-AirFlow-Lab-2D-/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/Elamouri/PC-AirFlow-Lab-2D-?style=for-the-badge&label=version"></a>
+  <a href="https://github.com/Elamouri/PC-AirFlow-Lab-2D-/releases/latest/download/PC_Airflow_Lab.exe"><img src="docs/images/download-button.svg" width="320" alt="Download PC_Airflow_Lab.exe for Windows"></a><br>
+  <sub>Windows 10 / 11 (64-bit) · version 1.4.0 · <a href="https://github.com/Elamouri/PC-AirFlow-Lab-2D-/releases/latest">release notes</a></sub>
 </p>
 
 <p align="center">
