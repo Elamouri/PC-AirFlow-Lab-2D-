@@ -1,0 +1,3 @@
+# keep the Windows start files with CRLF line ends exactly as they are
+*.bat -text
+*.sh text eol=lf

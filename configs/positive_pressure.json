@@ -1,0 +1,107 @@
+{
+  "case": {
+    "name": "Mid-tower 440 x 450 mm",
+    "depth_mm": 440.0,
+    "height_mm": 450.0,
+    "width_mm": 210.0,
+    "shroud": true,
+    "shroud_height_mm": 90.0,
+    "shroud_length_mm": 340.0,
+    "front_panel": "mesh + dust filter",
+    "top_panel": "mesh + dust filter"
+  },
+  "fans": [
+    {
+      "wall": "front",
+      "pos_mm": 130.0,
+      "pos2_mm": 0.0,
+      "direction": "in",
+      "model": "Generic 120 mm (1500 rpm)",
+      "speed_pct": 70.0
+    },
+    {
+      "wall": "front",
+      "pos_mm": 250.0,
+      "pos2_mm": 0.0,
+      "direction": "in",
+      "model": "Generic 120 mm (1500 rpm)",
+      "speed_pct": 70.0
+    },
+    {
+      "wall": "front",
+      "pos_mm": 370.0,
+      "pos2_mm": 0.0,
+      "direction": "in",
+      "model": "Generic 120 mm (1500 rpm)",
+      "speed_pct": 70.0
+    },
+    {
+      "wall": "top",
+      "pos_mm": 100.0,
+      "pos2_mm": 0.0,
+      "direction": "out",
+      "model": "Generic 120 mm (1500 rpm)",
+      "speed_pct": 70.0
+    },
+    {
+      "wall": "top",
+      "pos_mm": 220.0,
+      "pos2_mm": 0.0,
+      "direction": "out",
+      "model": "Generic 120 mm (1500 rpm)",
+      "speed_pct": 70.0
+    },
+    {
+      "wall": "top",
+      "pos_mm": 340.0,
+      "pos2_mm": 0.0,
+      "direction": "in",
+      "model": "Generic 120 mm (1500 rpm)",
+      "speed_pct": 70.0
+    },
+    {
+      "wall": "rear",
+      "pos_mm": 342.0,
+      "pos2_mm": 0.0,
+      "direction": "out",
+      "model": "Generic 120 mm (1500 rpm)",
+      "speed_pct": 70.0
+    }
+  ],
+  "cpu": "AMD Ryzen 7 7800X3D",
+  "cpu_power_w": 0.0,
+  "cooler": "Single tower 120 mm (Hyper 212 / AK400 class)",
+  "cooler_fan_pct": -1.0,
+  "cooler_fan_model": "",
+  "cooler_fans": 0,
+  "cooler_orientation": "to rear",
+  "aio_mount": "top",
+  "aio_direction": "out",
+  "gpu": "NVIDIA GeForce RTX 4070 Super",
+  "gpu_power_w": 0.0,
+  "gpu_fan_pct": -1.0,
+  "gpu_length_mm": 0.0,
+  "psu_watts": 750,
+  "psu_rating": "80 PLUS Gold",
+  "psu_fan_mode": "bottom intake",
+  "psu_fan_pct": -1.0,
+  "load": "gaming",
+  "room_c": 22.0,
+  "quality": "normal",
+  "motherboard": "ATX mainstream (B650 / B760 / B860 class)",
+  "ram_sticks": 2,
+  "ram_type": "DDR5",
+  "ram_ecc": false,
+  "nvme_count": 1,
+  "hdd_count": 0,
+  "filter_condition": "clean",
+  "altitude_m": 0.0,
+  "fan_curve": {
+    "source": "hottest",
+    "t_lo": 50.0,
+    "t_hi": 80.0,
+    "pct_lo": 30.0,
+    "pct_hi": 100.0
+  },
+  "version": 2
+}
