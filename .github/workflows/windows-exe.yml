@@ -1,0 +1,58 @@
+# Builds PC_Airflow_Lab.exe on Windows and publishes it as a release when a version tag (v1.4.0, ...) is pushed.
+# PC Airflow Lab - Powered by ElAmouri (https://github.com/Elamouri)
+name: Windows exe
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install the libraries
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Physics self-test
+        run: python run_cli.py --selftest
+
+      - name: Build PC_Airflow_Lab.exe
+        run: python -m PyInstaller --noconfirm --clean pc_airflow_lab.spec
+
+      - name: Check the exe
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\PC_Airflow_Lab.exe -ArgumentList '--cli', '--selftest' -Wait -PassThru `
+               -RedirectStandardOutput selftest.txt -RedirectStandardError selftest_err.txt
+          Get-Content selftest.txt | Select-Object -Last 2
+          Get-Content selftest_err.txt
+          if ($p.ExitCode -ne 0) { throw "the exe self-test failed ($($p.ExitCode))" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PC_Airflow_Lab-exe
+          path: dist/PC_Airflow_Lab.exe
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $hash = (Get-FileHash dist\PC_Airflow_Lab.exe -Algorithm SHA256).Hash.ToLower()
+          Copy-Item docs\RELEASE_NOTES.md notes.md
+          Add-Content notes.md ("`nSHA-256 of PC_Airflow_Lab.exe: ``" + $hash + "``")
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          gh release create $env:GITHUB_REF_NAME dist\PC_Airflow_Lab.exe --title "PC Airflow Lab $version" --notes-file notes.md
