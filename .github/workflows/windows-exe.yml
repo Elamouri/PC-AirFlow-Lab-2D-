@@ -1,9 +1,13 @@
-# Builds PC_Airflow_Lab.exe on Windows and publishes it as a release when a version tag (v1.4.0, ...) is pushed.
+# Builds PC_Airflow_Lab.exe on Windows and publishes it as a GitHub release.
+# It runs when the version in pcflow/__init__.py changes on main (and the release for that version does not exist
+# yet), when a version tag is pushed, or by hand: Actions -> Windows exe -> Run workflow.
 # PC Airflow Lab - Powered by ElAmouri (https://github.com/Elamouri)
 name: Windows exe
 
 on:
   push:
+    branches: [main]
+    paths: ['pcflow/__init__.py', '.github/workflows/windows-exe.yml', 'docs/RELEASE_NOTES.md']
     tags: ['v*']
   workflow_dispatch:
 
@@ -19,6 +23,19 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+
+      - name: Which version
+        id: version
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = python -c "import pcflow; print(pcflow.__version__)"
+          "tag=v$v" >> $env:GITHUB_OUTPUT
+          gh release view "v$v" --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) { "exists=yes" >> $env:GITHUB_OUTPUT } else { "exists=no" >> $env:GITHUB_OUTPUT }
+          $global:LASTEXITCODE = 0
+          Write-Host "version v$v"
 
       - name: Install the libraries
         run: |
@@ -46,13 +63,14 @@ jobs:
           path: dist/PC_Airflow_Lab.exe
 
       - name: Publish the release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: steps.version.outputs.exists == 'no'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
           $hash = (Get-FileHash dist\PC_Airflow_Lab.exe -Algorithm SHA256).Hash.ToLower()
           Copy-Item docs\RELEASE_NOTES.md notes.md
           Add-Content notes.md ("`nSHA-256 of PC_Airflow_Lab.exe: ``" + $hash + "``")
-          $version = $env:GITHUB_REF_NAME.TrimStart('v')
-          gh release create $env:GITHUB_REF_NAME dist\PC_Airflow_Lab.exe --title "PC Airflow Lab $version" --notes-file notes.md
+          gh release create $env:TAG dist\PC_Airflow_Lab.exe --target $env:GITHUB_SHA `
+            --title ("PC Airflow Lab " + $env:TAG.TrimStart('v')) --notes-file notes.md --latest
