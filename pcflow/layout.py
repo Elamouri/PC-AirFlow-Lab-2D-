@@ -24,6 +24,7 @@ MMH2O = 9.80665              # Pa per mm of water
 CFM = 2118.88                # CFM per m^3/s
 RHO = RHO_SEA
 TOUCH = 1.0                  # parts may touch (overlap up to this many mm) without counting as a clash
+SIDE_SAMPLE = 3.0            # mm between the points that check how much of a side fan is over a solid block
 WALL_TOUCH = 2.0             # same along a wall
 
 K_CROSS = 3000.0             # porous resistances (1/s)
@@ -104,6 +105,7 @@ class Layout:
         self.draw = {'wall_fans': [], 'side_fans': [], 'inside_fans': [], 'rejected': [], 'hdd': None,
                      'blocks': [], 'rejected_blocks': []}
         self.block_probes = []       # (block index, cells of the air in / round it) for its temperature
+        self.solid_boxes = []        # solid blocks (mm): no air there for a side-panel fan to blow into
         self.occupied = {'front': [], 'top': [], 'rear': [], 'bottom': []}
         self._heat_masks = []
         self._orphan_heat = 0.0
@@ -301,11 +303,36 @@ class Layout:
     def side_centre(self, s, x, y):
         return float(np.clip(x, s / 2, self.D - s / 2)), float(np.clip(y, s / 2, self.H - s / 2))
 
+    def _side_air(self, s, cx, cy):
+        """the cells a side-panel fan of size s centred (cx, cy) blows into: its circle, where there is air
+        (returns the slice of the grid and those cells)"""
+        g = self.h_mm
+        sl = self.cells(cx - s / 2 - g, cx + s / 2 + g, cy - s / 2 - g, cy + s / 2 + g)
+        jj, ii = np.mgrid[sl]
+        circle = ((ii - 0.5) * g - cx) ** 2 + ((jj - 0.5) * g - cy) ** 2 <= (s / 2) ** 2
+        return sl, circle & (self.ct[sl] == FLUID)
+
+    def side_on_solid(self, s, cx, cy):
+        """how much of a side fan's circle is over solid blocks (0..1), in mm: the same at every detail level"""
+        if not self.solid_boxes:
+            return 0.0
+        r = s / 2
+        g = np.arange(-r + SIDE_SAMPLE / 2, r, SIDE_SAMPLE)
+        X, Y = np.meshgrid(g, g)
+        inside = X * X + Y * Y <= r * r
+        X, Y = X[inside] + cx, Y[inside] + cy
+        hit = np.zeros(len(X), bool)
+        for x0, x1, y0, y1 in self.solid_boxes:
+            hit |= (X >= x0) & (X <= x1) & (Y >= y0) & (Y <= y1)
+        return float(hit.mean()) if len(hit) else 0.0
+
     def why_side(self, s, x, y):
         cx, cy = self.side_centre(s, x, y)
         for sd in self.sides:
             if math.hypot(cx - sd['centre'][0], cy - sd['centre'][1]) < s / 2 + sd['r'] - WALL_TOUCH:
                 return '%s on the side panel' % sd['label']
+        if self.side_on_solid(s, cx, cy) > 0.75:          # hardly any air left for it to blow into
+            return 'a solid part'
         return None
 
     # ------------------------------------------------------------------ build
@@ -755,6 +782,7 @@ class Layout:
         sl_ = self.cells(*box)
         if b.air == 'solid':
             self.ct[sl_] = SOLID
+            self.solid_boxes.append(box)
         else:
             K = BLOCK_K[b.air]
             self.Kx[sl_] = np.maximum(self.Kx[sl_], K)
@@ -850,13 +878,13 @@ class Layout:
         why = self.why_side(s, cx, cy)
         if why:
             self._reject(box, label, k, why)
-            self.warnings.append('%s overlaps %s - left out' % (label, why))
+            self.warnings.append('%s (side) sits on a solid part - left out' % label if why == 'a solid part' else
+                                 '%s overlaps %s - left out' % (label, why))
             return
-        jj, ii = np.mgrid[0:self.NY, 0:self.NX]
-        xc = (ii - 1 + 0.5) * self.h_mm
-        yc = (jj - 1 + 0.5) * self.h_mm
-        m = ((xc - cx) ** 2 + (yc - cy) ** 2 <= (s / 2) ** 2) & (self.ct == FLUID)
-        if m.sum() < 4:
+        sl, air = self._side_air(s, cx, cy)
+        m = np.zeros((self.NY, self.NX), bool)
+        m[sl] = air
+        if m.sum() < 4:                                    # (a very small fan right on a solid part)
             self._reject(box, label, k, 'a solid part')
             self.warnings.append('%s (side) sits on a solid part - left out' % label)
             return
@@ -938,8 +966,15 @@ class Layout:
                 op.update(arr='v', faces=(NY - 1) * NX + c, out_sign=+1, tin=(NY - 2) * NX + c)
             else:
                 op.update(arr='v', faces=1 * NX + c, out_sign=-1, tin=1 * NX + c)
-        for hsrc in self.heat:
+        fluid = self.ct == FLUID
+        lost = 0.0
+        for hsrc in self.heat:                 # a block touching a part may have closed a row of its cells since
+            hsrc['mask'] &= fluid
             hsrc['idx'] = np.nonzero(hsrc['mask'].ravel())[0]
+            if len(hsrc['idx']) == 0:
+                lost, hsrc['P'] = lost + hsrc['P'], 0.0
+        if lost and self.heat:                 # (never seen) its heat still counts: the biggest heat area takes it
+            max(self.heat, key=lambda hs: len(hs['idx']))['P'] += lost
         for sd in self.sides:
             sd['idx'] = np.nonzero(sd['mask'].ravel())[0]
         self.block_probes = [(k, np.nonzero((m & (self.ct == FLUID)).ravel())[0]) for k, m in self.block_probes]

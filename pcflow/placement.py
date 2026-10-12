@@ -62,12 +62,14 @@ class Probe:
         xs = np.unique(xs[(xs >= w / 2 - 1e-6) & (xs <= L.D - w / 2 + 1e-6)])
         ys = np.unique(ys[(ys >= h / 2 - 1e-6) & (ys <= L.H - h / 2 + 1e-6)])
         X, Y = [a.ravel() for a in np.meshgrid(xs, ys)]
+        X = np.clip(np.round(X, 1), w / 2, L.D - w / 2)        # checked exactly as it is stored (to 0.1 mm)
+        Y = np.clip(np.round(Y, 1), h / 2, L.H - h / 2)
         ok = L.free(np.stack([X - w / 2, X + w / 2, Y - h / 2, Y + h / 2], axis=1))
         if not ok.any():
             return None
         d = np.where(ok, np.hypot(X - nx, Y - ny), np.inf)
         i = int(np.argmin(d))
-        return round(float(X[i]), 1), round(float(Y[i]), 1)
+        return float(X[i]), float(Y[i])
 
     # ------------------------------------------------------------------ search
     def natural_spot(self, wall, s):

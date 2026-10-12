@@ -188,10 +188,14 @@ class Geometry:
         opened[comp[to_room]] = True
         shut = np.flatnonzero(~opened)
         self.sealed = []                                         # cells of air in each closed pocket
+        self.pocket = np.full(NY * NX, -1)                       # which closed pocket a cell is in (-1: none)
         if len(shut):
             order = np.argsort(comp, kind='stable')
             diag[order[np.searchsorted(comp[order], shut)]] -= 1.0
             self.sealed = [int(n) for n in np.bincount(comp, minlength=n_comp)[shut]]
+            number = np.full(n_comp, -1)
+            number[shut] = np.arange(len(shut))
+            self.pocket[self.fl_idx] = number[comp]
         self.n_air = nfl
         t0 = time.time()
         A = links + sp.diags(diag)
@@ -276,7 +280,8 @@ class Solver:
         self.geo = geo if (geo is not None and geo.same(ct)) else Geometry(ct)
         self.lu = self.geo.lu
         self.t_factor = time.time() - t0
-        sealed = self.geo.sealed
+        fed = {int(p) for sd in L.sides for p in self.geo.pocket[sd['idx']]}     # a side-panel fan lets air in / out
+        sealed = [n for k, n in enumerate(self.geo.sealed) if k not in fed]
         if sealed:
             if max(sealed) > 0.5 * self.geo.n_air:
                 note = ('No fan or opening lets air in or out of the case - the air only moves round inside '

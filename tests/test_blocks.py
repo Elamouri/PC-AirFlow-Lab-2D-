@@ -340,3 +340,51 @@ def test_random_block_setups_never_break():
         if not any('no free spot' in n for n in notes):
             assert Layout(cfg, 4.0).draw['rejected_blocks'] == []
             assert placement.resolve(cfg) == []
+
+
+# ---------------------------------------------------------------- found in review
+def test_a_snapped_block_is_checked_where_it_is_stored():
+    """the free spot is checked at 0.1 mm, as stored: a rounded spot may not end up 1.05 mm on a fan"""
+    cfg = with_blocks(Block('Divider panel', 10, 330, 4.3, 100, 'solid', 0))
+    ok, _ = placement.snap_block(cfg, 0, near=(10, 330))
+    assert ok
+    nothing_left_out(cfg)
+    for w10 in range(41, 80):                                      # widths with an odd tenth
+        cfg = with_blocks(Block('Divider panel', 10, 330, w10 / 10, 100, 'solid', 0))
+        assert placement.snap_block(cfg, 0, near=(10, 330))[0]
+        assert Layout(cfg, 4.0).draw['rejected'] == [], w10
+
+
+def test_a_side_fan_never_goes_onto_a_solid_block():
+    cfg = with_blocks(Block(WALL, 250, 330, 160, 160, 'solid', 0))
+    fan = Fan('side', 250, 330, 'in')
+    probe = placement.Probe(cfg)
+    assert probe.why(fan) == 'a solid part'
+    ok, _ = placement.place_new(cfg, fan, near=(250, 330))
+    assert ok
+    cfg.fans.append(fan)
+    nothing_left_out(cfg)
+    cfg.fans[-1].pos_mm, cfg.fans[-1].pos2_mm = 250, 330          # e.g. from a file: Fix overlaps really moves it
+    assert any('Fan 8 overlapped a solid part' in n for n in placement.resolve(cfg))
+    nothing_left_out(cfg)
+    assert placement.resolve(cfg) == []
+
+
+def test_side_fans_are_a_way_in_and_out():
+    m = hw.DEFAULT_CASE_FAN
+    cfg = my_pc()
+    cfg.fans = [Fan('side', 300, 250, 'in', m, 100), Fan('side', 120, 330, 'out', m, 100)]
+    sim, s = run(cfg, 2.0)
+    assert not any('No fan or opening' in w or 'pocket' in w for w in sim.L.warnings)
+    r = sim.raw
+    assert abs(r['cfm_in'] - r['cfm_out']) / r['cfm_in'] < 0.01
+
+
+def test_a_block_touching_the_gpu_never_takes_its_heat():
+    cfg = with_blocks(Block(WALL, 137, 259.5, 80, 20, 'solid', 0))
+    for h in (4.0, 3.0, 2.0):
+        L = Layout(cfg, h)
+        assert L.draw['rejected_blocks'] == []
+        for src in L.heat:
+            assert (L.ct.ravel()[src['idx']] != SOLID).all(), (h, src['name'])
+        assert sum(src['P'] for src in L.heat) == pytest.approx(L.loads['p_dc'] - L.loads['p_usb'] + L.loads['p_psu'])
