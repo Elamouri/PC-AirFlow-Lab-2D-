@@ -68,9 +68,9 @@ class CaseView:
         self.icon_text = []
         self._static()
         self.dash_lines = []                       # flow dashes, grouped by how faded they are: one path each
-        for j in range(DASH_SHADES):
+        for j in range(DASH_SHADES):              # (square ends: at this width they look the same and draw quicker)
             line = Line2D([], [], color=(0, 0, 0, 0.78 * (j + 0.5) / DASH_SHADES), lw=1.15 * fs, zorder=4,
-                          solid_capstyle='round')
+                          solid_capstyle='butt')
             ax.add_line(line)
             self.dash_lines.append(line)
         self.blade_lc = LineCollection([], colors='#c9d1e0', linewidths=1.0 * fs, alpha=0.75, zorder=6.5)
@@ -394,7 +394,7 @@ class CaseView:
 
     # ------------------------------------------------------------------ per frame
     def update(self, k, T, P, summary):
-        self.T_last = np.asarray(T, dtype=np.float32)
+        self.T_last = np.array(T, dtype=np.float32)          # a copy: the solver reuses its arrays
         self.img.set_data(self.T_last)
         if P is not None and len(P):
             P = P[:self.n_dash]
@@ -471,6 +471,15 @@ def _freeze(x):
     return x
 
 
+def clear_view(ax):
+    """take a case drawing off its axes, ready for the next one (ax.clear() also rebuilds the hidden ticks and
+    spines, which made every redrawn layout about 20 ms slower)"""
+    keep = {id(ax.patch), id(ax.title), id(ax._left_title), id(ax._right_title)}
+    for a in list(ax.get_children()):
+        if id(a) not in keep and not isinstance(a, (Spine, Axis)):
+            a.remove()
+
+
 def drawing_key(L):
     """two layouts with the same key look the same on screen (only fan speeds, loads or temperatures differ)"""
     c = L.cfg.case
@@ -490,12 +499,17 @@ class LiveFrames:
 
     LEVELS = (1.0, 4.0, 6.5, 9.0, 12.0)        # z-orders of the moving parts: field, dashes, edge blades, icons, numbers
 
-    def __init__(self, canvas, view):
+    def __init__(self, canvas, view, previous=None):
+        """previous = the LiveFrames of the view this one replaces: its background is reused when it still fits"""
         self.canvas, self.view, self.ax = canvas, view, view.ax
         self.key = None
         self.text_key = None
         self.last = None
         self.texts = None
+        self.bg = None
+        self.bg_key = None
+        if previous is not None and previous.bg is not None:
+            self.bg, self.bg_key = previous.bg, previous.bg_key
 
     def invalidate(self):
         self.key = None
@@ -504,6 +518,9 @@ class LiveFrames:
         ax = self.ax
         return (self.canvas.get_width_height(), tuple(np.round(ax.bbox.bounds, 2)), tuple(ax.get_xlim()),
                 tuple(ax.get_ylim()))
+
+    def _background_key(self):
+        return self.canvas.get_width_height(), tuple(np.round(self.ax.bbox.bounds, 2))
 
     def _static(self):
         v, ax = self.view, self.ax
@@ -545,20 +562,25 @@ class LiveFrames:
 
     def _build(self):
         canvas, ax = self.canvas, self.ax
+        ax.apply_aspect()                            # a new case size moves the view box (normally done while drawing)
         static = self._static()
         everything = static + [a for a in ax.get_children() if a not in static]
         shown = [(a, a.get_visible()) for a in everything]
         lv = self.LEVELS
+        bg_key = self._background_key()
+        reuse = (self.bg is not None and self.bg_key == bg_key and
+                 not any(a.get_zorder() < lv[0] for a in static))    # the background has nothing of the view in it
         try:
-            for a in everything:                     # 1. the background: the figure without this view
-                if not (a in static and a.get_zorder() < lv[0]):
-                    a.set_visible(False)
-            ax.patch.set_visible(dict(shown).get(ax.patch, True))
-            FigureCanvasAgg.draw(canvas)
-            self.bg = canvas.copy_from_bbox(ax.bbox)
-            canvas.blit()                            # the rest of the figure (colour bar) is on screen now
-            for a, vis in shown:
-                a.set_visible(vis)
+            if not reuse:
+                for a in everything:                 # 1. the background: the figure without this view
+                    if not (a in static and a.get_zorder() < lv[0]):
+                        a.set_visible(False)
+                ax.patch.set_visible(dict(shown).get(ax.patch, True))
+                FigureCanvasAgg.draw(canvas)
+                self.bg, self.bg_key = canvas.copy_from_bbox(ax.bbox), bg_key
+                canvas.blit()                        # the rest of the figure (colour bar) is on screen now
+                for a, vis in shown:
+                    a.set_visible(vis)
             renderer = canvas.get_renderer()
             self.box = self._box()
             z = lambda a: a.get_zorder()

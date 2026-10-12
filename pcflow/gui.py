@@ -36,9 +36,9 @@ from . import library, placement
 from .config import (Config, Fan, PRESETS, QUALITY_MM, PSU_FAN_MODES, COOLER_ORIENTATIONS, INSIDE_DIRS, RAM_STICKS,
                      FAN_CURVE_SOURCES, my_pc)
 from .layout import Layout
-from .solver import Solver
+from .solver import Solver, LIVE_STEP
 from .results import summarize, text_report
-from .render import CaseView, LiveFrames, CMAP, VMIN, VMAX, drawing_key
+from .render import CaseView, LiveFrames, CMAP, VMIN, VMAX, drawing_key, clear_view
 from .thermal import compute_loads
 
 BG = '#0f1420'
@@ -62,6 +62,8 @@ TAB_FANS = 1
 SIM_SLICE = 0.016                 # s of simulation per turn of the event loop - the window answers in between
 FRAME_GAP = 0.045                 # s between pictures (about 20 a second) ...
 FRAME_GAP_SETTLING = 0.20         # ... and 5 a second while the air settles after a change
+FRAME_SHARE = 0.30                # pictures never take more than this share of the time: on a slower PC the
+                                  # picture rate drops a little and the simulation keeps its speed
 SPIN_RATE = 9.0                   # fan blade animation steps per second
 DESIGN_SIZE = (1600, 1040)        # room the window needs at 100 % text size (with the taskbar)
 BASE_SCALING = 96 / 72            # Tk pixels per point at 100 % display scaling
@@ -338,6 +340,7 @@ class App:
         self.k_anim = 0.0                      # animation phase of the spinning fans
         self._anim_t = 0.0
         self._last_frame = 0.0
+        self._frame_cost = 0.0                 # how long a picture takes on this PC (s, smoothed)
         self.live = None                       # quick drawing of the live view (render.LiveFrames)
         self.summary = None
         self._pending = None
@@ -997,8 +1000,23 @@ class App:
     def _tab_results(self, nb):
         f = ttk.Frame(nb, padding=8)
         nb.add(f, text='Results')
+        self.tab_results = f
         self.txt = tk.Text(f, bg=FIELD, fg=TXT, insertbackground=TXT, font=('Consolas', 9), relief='flat', wrap='none')
         self.txt.pack(fill='both', expand=True)
+        nb.bind('<<NotebookTabChanged>>', lambda e: self.update_report() if self._results_shown() else None, add='+')
+
+    def _results_shown(self):
+        try:
+            return self.nb.select() == str(self.tab_results)
+        except tk.TclError:
+            return False
+
+    def update_report(self):
+        """the full text report (only made while the Results tab is open: it is not needed otherwise)"""
+        if self.sim is None or self.sim.disp is None:
+            return
+        self.txt.delete('1.0', 'end')
+        self.txt.insert('1.0', text_report(self.sim))
 
     # ================================================================ config <-> widgets
     def load_widgets_from_cfg(self, keep_sel=False):
@@ -1968,7 +1986,8 @@ class App:
         try:
             layout = Layout(self.cfg)
             prev = self.sim if keep else None
-            self.sim = Solver(layout, n_particles=PART_COUNT.get(self.cfg.quality, 900), previous=prev)
+            self.sim = Solver(layout, n_particles=PART_COUNT.get(self.cfg.quality, 900), previous=prev,
+                              dt=LIVE_STEP * layout.h)
         except Exception as e:                       # noqa: BLE001 - show it, never keep old results on screen
             log.exception('could not build the setup')
             self.sim, self.summary = None, None
@@ -1988,9 +2007,9 @@ class App:
         if keep and self.view is not None and self.live is not None and self.view.key == drawing_key(layout):
             self.view.retarget(layout)               # only speeds / loads changed: the drawing stays
         else:
-            self.ax.clear()
+            clear_view(self.ax)
             self.view = CaseView(self.ax, layout, fs=0.78, dashes=PART_COUNT.get(self.cfg.quality, 900))
-            self.live = LiveFrames(self.canvas, self.view)
+            self.live = LiveFrames(self.canvas, self.view, previous=self.live)
             self.summary = None
         self.settle_until = self.sim.t + (0.8 if keep else 1.5)
         w = layout.warnings
@@ -2035,9 +2054,8 @@ class App:
         if self.k % 8 == 0 and self.summary is not None:
             self.update_tiles()
             self.update_tree_live()
-        if self.k % 40 == 0 and self.sim.disp is not None:
-            self.txt.delete('1.0', 'end')
-            self.txt.insert('1.0', text_report(self.sim))
+        if self.k % 40 == 0 and self.sim.disp is not None and self._results_shown():
+            self.update_report()
 
     def tick(self):
         """one short slice of simulation (and a new picture when one is due), then back to the window:
@@ -2047,16 +2065,20 @@ class App:
         try:
             if self.running and self.sim is not None and self.view is not None and self.drag is None:
                 settling = self.sim.t < getattr(self, 'settle_until', 0.0)
-                if t_start - self._last_frame >= (FRAME_GAP_SETTLING if settling else FRAME_GAP):
+                gap = FRAME_GAP_SETTLING if settling else max(FRAME_GAP, self._frame_cost / FRAME_SHARE)
+                if t_start - self._last_frame >= gap:
                     self._last_frame = t_start           # a picture this turn, simulation the next turns
                     self.show_frame()
+                    cost = min(time.perf_counter() - t_start, 0.1)       # (a first picture of a new layout is slow)
+                    self._frame_cost += 0.2 * (cost - self._frame_cost)
                 else:
                     n = 0
                     while n < 40 and time.perf_counter() - t_start < SIM_SLICE:
                         self.sim.step()
                         self.sim.move_particles()
                         n += 1
-                delay = 0 if settling else 2
+                    self.root.update_idletasks()         # redraw changed controls now, not at the next picture
+                delay = 0
             self.poll_job()
             self._errors = 0
         except Exception as e:                       # noqa: BLE001 - keep the app alive, show and log the problem
@@ -2068,6 +2090,8 @@ class App:
                 self.show_notes('Simulation paused', ['The simulation kept failing: %s' % e,
                                                       'Details are in %s' % (getattr(self, 'log_path', None) or
                                                                              'the log')])
+        # 0 = right after the clicks and key presses waiting now (any other delay waits for the next ~15 ms clock
+        # tick on Windows); never after_idle: update_idletasks() would then run the simulation forever
         self.root.after(delay, self.tick)
 
     def update_tiles(self):
