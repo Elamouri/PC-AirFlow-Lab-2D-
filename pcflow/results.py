@@ -70,6 +70,13 @@ def summarize(sim):
     psu = per.get('PSU', {})
     cfm_in = sum(f['cfm'] for f in fans if f['direction'] == 'in')
     cfm_out = sum(f['cfm'] for f in fans if f['direction'] == 'out')
+    blocks = []
+    by_index = {b['index']: b for b in L.draw.get('blocks', [])}
+    for k, idx in getattr(L, 'block_probes', []):
+        b = by_index.get(k)
+        if b is not None:
+            blocks.append(dict(label=b['label'], model=b['model'], air=b['air'], watts=b['watts'], box=b['box'],
+                               t_air=float(Tf[idx].mean()) if len(idx) else L.room))
     t_hdd = None
     hdd = next((h for h in sim.hs if h['name'] == 'hdd' and len(h['idx'])), None)
     if hdd is not None:
@@ -81,7 +88,7 @@ def summarize(sim):
                 heat_in=d.get('heat_in', 0.0), heat_out=d.get('heat_out', 0.0), loads=loads,
                 cooler_cfm=sum(v for k, v in d.items() if k.startswith('CFM_Cooler fan')) /
                 max(1, sum(1 for f in L.fans if f.kind == 'cooler')),
-                cooler_ratio=cooler_ratio, gpu_ratio=gpu_ratio, t_hdd=t_hdd,
+                cooler_ratio=cooler_ratio, gpu_ratio=gpu_ratio, t_hdd=t_hdd, blocks=blocks,
                 gpu_fan_cfm=sum(v for k, v in d.items() if k.startswith('CFM_GPU fan')),
                 warnings=L.warnings, n_in=L.n_in, n_out=L.n_out, room=L.room, t=sim.t)
 
@@ -107,7 +114,8 @@ def text_report(sim):
     lines.append('RAM  %d x %s%s: %.1f W   |   M.2 SSDs x%d: %.1f W   |   hard drives x%d: %.1f W%s' % (
         cfg.ram_sticks, cfg.ram_type, ' ECC' if cfg.ram_ecc else '', ld['p_ram'], cfg.nvme_count, ld['p_nvme'],
         cfg.hdd_count, ld['p_hdd'], ('  (drives ~%.0f C)' % s['t_hdd']) if s['t_hdd'] is not None else ''))
-    lines.append('Fans and pump %.1f W   |   USB devices %.0f W (heat stays outside the case)' % (ld['p_fans'], ld['p_usb']))
+    lines.append('Fans and pump %.1f W   |   USB devices %.0f W (heat stays outside the case)%s' % (
+        ld['p_fans'], ld['p_usb'], ('   |   your blocks %.0f W' % ld['p_blocks']) if ld.get('p_blocks') else ''))
     lines.append('System DC load %.0f W now, %.0f W max  |  from the wall %.0f W  |  PSU %d W %s at %.0f %%'
                  % (ld['p_dc'], ld['p_dc_max'], ld['p_wall'], cfg.psu_watts, cfg.psu_rating, 100 * ld['psu_frac']))
     lines.append('Recommended PSU for this PC: %d W' % ld['psu_recommended'])
@@ -136,6 +144,16 @@ def text_report(sim):
         lines.append('auto fans follow the %s temperature: %.0f %% at %.0f C ... %.0f %% at %.0f C' % (
             {'hottest': 'hottest (CPU or GPU)', 'cpu': 'CPU', 'gpu': 'GPU'}[c['source']], c['pct_lo'], c['t_lo'],
             c['pct_hi'], c['t_hi']))
+    if cfg.blocks:
+        lines.append('-' * 76)
+        lines.append('%-8s %-28s %-17s %-7s %6s %9s' % ('block', 'kind', 'size / place (mm)', 'air', 'heat', 'air at it'))
+        built = {b['label']: b for b in s['blocks']}
+        for k, b in enumerate(cfg.blocks):
+            lab = 'Block %d' % (k + 1)
+            got = built.get(lab)
+            lines.append('%-8s %-28s %-17s %-7s %5.0f W %9s' % (
+                lab, b.model[:28], '%.0fx%.0f @%.0f,%.0f' % (b.w_mm, b.h_mm, b.x_mm, b.y_mm), b.air, b.watts,
+                ('%.1f C' % got['t_air']) if got else 'left out'))
     lines.append('-' * 76)
     lines.append('Heat leaving the case: ' + ', '.join('%s %.0f %%' % (k, v) for k, v in
                                                      sorted(s['heat_share'].items(), key=lambda kv: -kv[1])))

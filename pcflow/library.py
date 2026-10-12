@@ -1,4 +1,4 @@
-"""Your own parts: fans, graphics cards, processors, CPU coolers, motherboards and cases.
+"""Your own parts: fans, graphics cards, processors, CPU coolers, motherboards, cases and blocks.
 
 Parts made in the app (Parts tab) are checked against the ranges below, put into the same lists as
 the built-in parts (pcflow.hardware) and saved in my_parts.json:
@@ -34,9 +34,9 @@ MAX_IMPORTS = 60                      # parts one setup file may bring along
 MAX_DEPTH = 32                        # deepest nesting kept from a parts file (real parts are 2 levels deep)
 
 CATEGORIES = {'fan': 'Fans', 'gpu': 'Graphics cards', 'cpu': 'Processors', 'cooler': 'CPU coolers',
-              'motherboard': 'Motherboards', 'case': 'Cases'}
+              'motherboard': 'Motherboards', 'case': 'Cases', 'block': 'Blocks'}
 SINGULAR = {'fan': 'fan', 'gpu': 'graphics card', 'cpu': 'processor', 'cooler': 'CPU cooler',
-            'motherboard': 'motherboard', 'case': 'case'}
+            'motherboard': 'motherboard', 'case': 'case', 'block': 'block'}
 
 # characters that show nothing (fillers, joiners, direction marks, variation selectors ...)
 _INVISIBLE = set([0x00AD, 0x034F, 0x061C, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x3164, 0xFEFF, 0xFFA0]
@@ -99,6 +99,10 @@ FIELDS = {
              _f('shroud', 'PSU shroud', 'bool'),
              _f('shroud_height_mm', 'Shroud height', 'float', 80, 130, 'mm'),
              _f('shroud_length_mm', 'Shroud length', 'float', 170, 660, 'mm')],
+    'block': [_f('w', 'Width (front - rear)', 'float', hw.BLOCK_MIN_MM, hw.BLOCK_MAX_MM, 'mm'),
+              _f('h', 'Height', 'float', hw.BLOCK_MIN_MM, hw.BLOCK_MAX_MM, 'mm'),
+              _f('air', 'Air through it', 'choice', unit='solid / dense / cables / mesh', choices=tuple(hw.BLOCK_AIR)),
+              _f('watts', 'Heat it gives off', 'float', 0, hw.MAX_BLOCK_WATTS, 'W')],
 }
 
 _DEFAULTS = {
@@ -111,6 +115,7 @@ _DEFAULTS = {
     'motherboard': dict(form='ATX', chipset_w=7.0, vrm_eff=0.88, ecc=False),
     'case': dict(depth_mm=440.0, height_mm=450.0, width_mm=210.0, shroud=True, shroud_height_mm=90.0,
                  shroud_length_mm=340.0),
+    'block': dict(w=80.0, h=80.0, air='solid', watts=0.0),
 }
 
 
@@ -123,7 +128,7 @@ def _cat(cat):
 def table(cat: str) -> Dict[str, dict]:
     """the hardware list a category lives in"""
     return {'fan': hw.ALL_FANS, 'gpu': hw.GPUS, 'cpu': hw.CPUS, 'cooler': hw.COOLERS,
-            'motherboard': hw.MOTHERBOARDS, 'case': hw.CASES}[_cat(cat)]
+            'motherboard': hw.MOTHERBOARDS, 'case': hw.CASES, 'block': hw.BLOCKS}[_cat(cat)]
 
 
 _BUILTIN = {c: frozenset(table(c)) for c in CATEGORIES}
@@ -540,11 +545,11 @@ def used_parts(cfg) -> Dict[str, set]:
     if cfg.cooler_fan_model:
         fans.add(cfg.cooler_fan_model)
     return {'cpu': {cfg.cpu}, 'gpu': {cfg.gpu}, 'cooler': {cfg.cooler}, 'motherboard': {cfg.motherboard},
-            'case': {cfg.case.name}, 'fan': fans}
+            'case': {cfg.case.name}, 'fan': fans, 'block': {b.model for b in getattr(cfg, 'blocks', [])}}
 
 
-def referenced_parts(d: dict, max_fans: int = 40) -> Dict[str, set]:
-    """the part names a raw setup dict refers to (before it is checked; only the fans that will be used)"""
+def referenced_parts(d: dict, max_fans: int = 40, max_blocks: int = 30) -> Dict[str, set]:
+    """the part names a raw setup dict refers to (before it is checked; only the fans and blocks that will be used)"""
     out = {c: set() for c in CATEGORIES}
     for cat, key in (('cpu', 'cpu'), ('gpu', 'gpu'), ('cooler', 'cooler'), ('motherboard', 'motherboard'),
                      ('fan', 'cooler_fan_model')):
@@ -557,6 +562,10 @@ def referenced_parts(d: dict, max_fans: int = 40) -> Dict[str, set]:
     fans = d.get('fans')
     if isinstance(fans, list):
         out['fan'].update(f['model'] for f in fans[:max_fans] if isinstance(f, dict) and isinstance(f.get('model'), str))
+    blocks = d.get('blocks')
+    if isinstance(blocks, list):
+        out['block'].update(b['model'] for b in blocks[:max_blocks]
+                            if isinstance(b, dict) and isinstance(b.get('model'), str))
     return out
 
 
@@ -631,5 +640,7 @@ def summary(cat: str, name: str) -> str:
     if cat == 'motherboard':
         return '%s · chipset %.0f W · power stage %.0f %%%s' % (p['form'], p['chipset_w'], 100 * p['vrm_eff'],
                                                                ' · ECC with Intel' if p['ecc'] else '')
+    if cat == 'block':
+        return '%.0f × %.0f mm · %s%s' % (p['w'], p['h'], p['air'], (' · %.0f W' % p['watts']) if p['watts'] else '')
     return '%.0f × %.0f × %.0f mm · %s' % (p['depth_mm'], p['height_mm'], p['width_mm'],
                                           'PSU shroud' if p['shroud'] else 'no shroud')

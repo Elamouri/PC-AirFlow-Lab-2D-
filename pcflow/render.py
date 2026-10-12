@@ -3,7 +3,8 @@ import numpy as np
 from matplotlib.axis import Axis
 from matplotlib.collections import LineCollection, PolyCollection, PatchCollection
 from matplotlib.lines import Line2D
-from matplotlib.patches import Rectangle, Circle, FancyBboxPatch, FancyArrow
+from matplotlib.colors import to_rgba
+from matplotlib.patches import Rectangle, Circle, FancyBboxPatch, FancyArrow, Polygon
 from matplotlib.spines import Spine
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -29,6 +30,14 @@ ACC_CREDIT = '#5ac8fa'                 # the 'Powered by' line under every pictu
 CMAP = plt.get_cmap('jet')
 LUT32 = np.ascontiguousarray((CMAP(np.linspace(0, 1, 256)) * 255 + 0.5).astype(np.uint8)).view(np.uint32).ravel()
 DASH_SHADES = 6                        # flow dashes fade in and out in this many steps
+HEAT = '#ff9f5a'                       # outline of a block that gives off heat
+BLOCK_STYLE = {                        # how much air gets through: solid ... mesh
+    'solid':  dict(fc=to_rgba('#596276', 0.95), ec='#dfe6f2', hatch='////'),
+    'dense':  dict(fc=to_rgba('#3a4152', 0.90), ec='#c9d1e0', hatch=None),
+    'cables': dict(fc=to_rgba('#2b303c', 0.55), ec='#aab3c5', hatch='\\\\'),
+    'mesh':   dict(fc='none', ec='#aab3c5', hatch='++'),
+}
+HANDLE_MM = 9.0                        # the triangle in a block's top-right corner: drag it to resize the block
 
 
 _BT = np.linspace(0, 1, 7)
@@ -86,8 +95,9 @@ class CaseView:
         self.dynamic_below = [self.img] + self.dash_lines
         self.dynamic_mid = [self.blade_lc, self.blades]
         self.dynamic_texts = ([self.t_cpu, self.t_gpu] + [t for _, t in self.t_icons] + [self.t_psu]
-                              + [t for t in (self.t_hdd, self.t_psu_in) if t is not None])
-        self.dynamic_top = [self.ghost]
+                              + [t for t in (self.t_hdd, self.t_psu_in) if t is not None]
+                              + [t for _, t in self.t_blocks])
+        self.dynamic_top = [self.ghost, self.ghost_box]
 
     def retarget(self, layout):
         """use this drawing for a new layout that looks the same (only speeds, loads or temperatures changed)"""
@@ -352,13 +362,55 @@ class CaseView:
                 self.icon_text.append((inf['label'], box[1] + 6, cy, 'left', 'center'))
             else:
                 self.icon_text.append((inf['label'], cx, box[3] + 8, 'center', 'bottom'))
-        for rj in L.draw.get('rejected', []):           # fans that could not be placed: show where they are
+        # blocks you placed yourself
+        self.block_text = []                       # where the air temperature of a heated block is shown
+        for b in L.draw.get('blocks', []):
+            self._block(b)
+        # fans and blocks that could not be placed: show where they are
+        for rj in L.draw.get('rejected', []) + L.draw.get('rejected_blocks', []):
             x0, x1, y0, y1 = rj['box']
             self._rect(x0, x1, y0, y1, fill=False, ec='#ffd166', lw=1.4, ls=(0, (3, 2)), zorder=13)
             ax.text(0.5 * (x0 + x1), 0.5 * (y0 + y1), '%s ✕' % rj['label'], color='#ffd166', fontsize=7.5 * fs,
                     ha='center', va='center', zorder=13, fontweight='bold')
         self.ghost = Circle((0, 0), 30, fill=False, ec='white', lw=1.5, ls=(0, (3, 2)), zorder=14, visible=False)
         ax.add_artist(self.ghost)
+        self.ghost_box = Rectangle((0, 0), 1, 1, fill=False, ec='white', lw=1.5, ls=(0, (3, 2)), zorder=14,
+                                   visible=False)
+        ax.add_artist(self.ghost_box)
+
+    def _block(self, b):
+        """one block: its fill shows how much air gets through, an orange outline that it makes heat"""
+        ax, fs, L = self.ax, self.fs, self.L
+        x0, x1, y0, y1 = b['box']
+        w, h = x1 - x0, y1 - y0
+        st = BLOCK_STYLE.get(b['air'], BLOCK_STYLE['solid'])
+        hot = b['watts'] > 0
+        ax.add_artist(Rectangle((x0, y0), w, h, fc=st['fc'], ec=HEAT if hot else st['ec'], hatch=st['hatch'],
+                                lw=1.3 if hot else 1.0, zorder=5.6))
+        g = min(HANDLE_MM, 0.45 * w, 0.45 * h)
+        ax.add_artist(Polygon([(x1, y1), (x1 - g, y1), (x1, y1 - g)], closed=True, fc='#e6ebf5', ec='none',
+                              alpha=0.85, zorder=5.7))
+        name = '%d · %s' % (b['index'] + 1, short(b['model']))
+        if hot:
+            name += ' · %.0f W' % b['watts']
+        size = 7.0 * fs
+        long = 5.2 * len(name) * fs + 6                                     # about how wide the name is (mm)
+        dy = 6.0 if hot else 0.0
+        cy = 0.5 * (y0 + y1)
+        if w >= long + 4 and h >= (30.0 if hot else 16.0):                  # room inside the block
+            x, y, ha = 0.5 * (x0 + x1), cy, 'center'
+        elif x1 + long < L.D - 4:                                           # beside it, inside the case
+            x, y, ha = x1 + 5, cy, 'left'
+        elif x0 - long > 4:
+            x, y, ha = x0 - 5, cy, 'right'
+        elif y1 + 28 < L.H:                                                 # above or below it
+            x, y, ha = 0.5 * (x0 + x1), y1 + 8 + dy, 'center'
+        else:
+            x, y, ha = 0.5 * (x0 + x1), y0 - 8 - 2 * dy, 'center'
+        ax.text(x, y + dy, name, color='white', fontsize=size, ha=ha, va='center', zorder=12, fontweight='bold',
+                bbox=dict(boxstyle='round,pad=0.15', fc='#000000', ec='none', alpha=0.45), parse_math=False)
+        if hot:
+            self.block_text.append((b['label'], x, y - dy - 2, ha))
 
     def _flow_arrow(self, c):
         st = c['stacks']
@@ -391,6 +443,10 @@ class CaseView:
             s0, s1 = self.L.draw['psu']['fan_span']
             self.t_psu_in = ax.text(0.5 * (s0 + s1) + 46, -64, '', ha='left', va='center', fontsize=7.5 * fs,
                                     color=TXT, zorder=12, fontweight='bold')
+        self.t_blocks = [(lab, ax.text(x, y, '', ha=ha, va='center', fontsize=7.0 * fs, color='#ffc9a0', zorder=12,
+                                       fontweight='bold', bbox=dict(boxstyle='round,pad=0.15', fc='#000000',
+                                                                    ec='none', alpha=0.45)))
+                         for lab, x, y, ha in self.block_text]
 
     # ------------------------------------------------------------------ per frame
     def update(self, k, T, P, summary):
@@ -454,6 +510,10 @@ class CaseView:
             self.t_hdd.set_text('drives ≈ %.0f °C' % s['t_hdd'])
         if self.t_psu_in is not None:
             self.t_psu_in.set_text('PSU fan\n%.0f CFM' % s['psu_cfm'])
+        if self.t_blocks:
+            air = {b['label']: b['t_air'] for b in s.get('blocks', [])}
+            for lab, t in self.t_blocks:
+                t.set_text(('air ≈ %.0f °C' % air[lab]) if lab in air else '')
 
 
 def _freeze(x):
@@ -712,9 +772,10 @@ class ReportFrame:
             self.tiles[key] = (bar, val, sub)
         fig.text(0.5, 0.079, '%s  ·  %s  ·  %s load  ·  room %.0f °C' % (cfg.cpu, cfg.gpu, cfg.load, cfg.room_c),
                  color=SUB, ha='center', va='center', fontsize=8.8, parse_math=False)
-        fig.text(0.5, 0.064, '%s board  ·  %d × %s%s  ·  %d SSD  ·  %d HDD  ·  PSU %d W %s' % (
+        fig.text(0.5, 0.064, '%s board  ·  %d × %s%s  ·  %d SSD  ·  %d HDD  ·  PSU %d W %s%s' % (
             L.draw.get('board_form', ''), cfg.ram_sticks, cfg.ram_type, ' ECC' if cfg.ram_ecc else '',
-            cfg.nvme_count, cfg.hdd_count, cfg.psu_watts, cfg.psu_rating),
+            cfg.nvme_count, cfg.hdd_count, cfg.psu_watts, cfg.psu_rating,
+            ('  ·  %d block%s' % (len(cfg.blocks), '' if len(cfg.blocks) == 1 else 's')) if cfg.blocks else ''),
             color=SUB, ha='center', va='center', fontsize=8.8)
         fig.text(0.5, 0.049, 'Case %.0f × %.0f × %.0f mm  ·  dust filters %s  ·  altitude %.0f m' % (
             cfg.case.depth_mm, cfg.case.height_mm, cfg.case.width_mm, cfg.filter_condition, cfg.altitude_m),

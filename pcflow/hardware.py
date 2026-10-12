@@ -252,3 +252,30 @@ FILTER_CONDITIONS = {'clean': 1.0, 'dusty': 1.6, 'clogged': 3.0}
 def panel_resistance(table, filters, panel, condition):
     """resistance (1/s) of a front / top panel with its dust filter in the given condition"""
     return table[panel] + (FILTER_CONDITIONS[condition] - 1.0) * filters.get(panel, 0.0)
+
+
+# ---------------------------------------------------------------- blocks: parts you place yourself
+# A block is anything you put in the case yourself (Blocks tab): something that stops the air, cables, a grille,
+# or a part that makes heat.  w x h = its size seen through the glass (mm), air = how much air gets through it,
+# watts = the heat it gives to the air (0 = none; it also counts in the power budget).
+BLOCK_AIR = {
+    'solid':  'solid: no air gets through',            # fills the case width: a panel, a divider, a closed cage
+    'dense':  'dense: air squeezes round it',          # fills most of the width: a pump, a drive, a card
+    'cables': 'cables: some air gets through',
+    'mesh':   'mesh: most air gets through',
+}
+BLOCKS = {
+    "Block (no air through)":      dict(w=80.0, h=80.0, air='solid', watts=0.0),
+    "Divider panel":               dict(w=4.0, h=150.0, air='solid', watts=0.0),
+    "Dense part (air goes round)": dict(w=80.0, h=60.0, air='dense', watts=0.0),
+    "Cable bundle":                dict(w=30.0, h=150.0, air='cables', watts=0.0),
+    "Mesh / grille":               dict(w=6.0, h=150.0, air='mesh', watts=0.0),
+    "Pump + reservoir":            dict(w=60.0, h=140.0, air='dense', watts=6.0),
+    "Capture / sound card":        dict(w=170.0, h=20.0, air='dense', watts=12.0),
+    '2.5" SSD':                    dict(w=100.0, h=10.0, air='dense', watts=3.0),
+    "Heat source":                 dict(w=60.0, h=40.0, air='cables', watts=20.0),
+}
+DEFAULT_BLOCK = "Block (no air through)"
+BLOCK_MIN_MM = 4.0             # thinnest block (a divider panel)
+BLOCK_MAX_MM = 700.0
+MAX_BLOCK_WATTS = 600.0

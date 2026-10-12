@@ -4,9 +4,12 @@ Run:  python run_gui.py   (or double-click start_windows.bat)
 
 Mouse on the picture:
   drag a fan            move it (wall fans slide along their wall; it never lands on another fan)
+  drag a block          move it; drag the small triangle in its top-right corner to resize it
   double-click          add a fan there (near a wall = wall fan, elsewhere = fan inside the case)
   mouse wheel on a fan  speed up / slow down by 5 %
   right-click a fan     reverse / auto / full speed / half speed / duplicate / delete
+  right-click a block   duplicate / turn 90° / how much air gets through / kind / delete
+  right-click elsewhere add a fan or a block there
 """
 import logging
 import logging.handlers
@@ -33,12 +36,12 @@ import numpy as np
 from . import branding
 from . import hardware as hw
 from . import library, placement
-from .config import (Config, Fan, PRESETS, QUALITY_MM, PSU_FAN_MODES, COOLER_ORIENTATIONS, INSIDE_DIRS, RAM_STICKS,
-                     FAN_CURVE_SOURCES, my_pc)
+from .config import (Config, Fan, Block, PRESETS, QUALITY_MM, PSU_FAN_MODES, COOLER_ORIENTATIONS, INSIDE_DIRS,
+                     RAM_STICKS, FAN_CURVE_SOURCES, MAX_BLOCKS, my_pc)
 from .layout import Layout
 from .solver import Solver, LIVE_STEP
 from .results import summarize, text_report
-from .render import CaseView, LiveFrames, CMAP, VMIN, VMAX, drawing_key, clear_view
+from .render import CaseView, LiveFrames, CMAP, VMIN, VMAX, HANDLE_MM, drawing_key, clear_view
 from .thermal import compute_loads
 
 BG = '#0f1420'
@@ -59,6 +62,8 @@ ORIENT_TEXT = {'to rear': 'blows to the rear (normal)', 'to top': 'blows up to t
 FAN_COUNT_TEXT = {1: '1 fan (push)', 2: '2 fans (push-pull / front + middle)', 3: '3 fans (dual tower: push + middle + pull)'}
 CURVE_TEXT = {'hottest': 'the hottest of CPU / GPU', 'cpu': 'the CPU temperature', 'gpu': 'the GPU temperature'}
 TAB_FANS = 1
+TAB_BLOCKS = 2
+AIR_SHORT = {'solid': 'solid', 'dense': 'dense', 'cables': 'cables', 'mesh': 'mesh'}
 SIM_SLICE = 0.016                 # s of simulation per turn of the event loop - the window answers in between
 FRAME_GAP = 0.045                 # s between pictures (about 20 a second) ...
 FRAME_GAP_SETTLING = 0.20         # ... and 5 a second while the air settles after a change
@@ -352,6 +357,8 @@ class App:
         self.sel = None
         self.drag = None
         self.drag_probe = None
+        self.bsel = None                       # selected block
+        self.bdrag = None                      # a block being moved / resized with the mouse
         self.drag_start = None
         self.part_mode, self.part_old = None, None
         self.part_vars = {}
@@ -415,8 +422,10 @@ class App:
         self.canvas.get_tk_widget().configure(bg=BG, highlightthickness=0)
         tiles = ttk.Frame(left)
         tiles.pack(side='bottom', fill='x', pady=(6, 0))
-        ttk.Label(left, text='Drag a fan to move it · double-click to add a fan · mouse wheel on a fan = speed · '
-                             'right-click a fan for more', style='Sub.TLabel').pack(side='bottom', anchor='w')
+        hint = ttk.Label(left, text='Drag fans and blocks · drag a block\'s corner to resize it · double-click: new fan · '
+                                    'wheel on a fan: speed · right-click: more', style='Sub.TLabel', justify='left')
+        hint.pack(side='bottom', anchor='w', fill='x')
+        hint.bind('<Configure>', lambda e: hint.configure(wraplength=max(200, e.width)))
         self.canvas.get_tk_widget().pack(side='top', fill='both', expand=True)
         self.canvas.mpl_connect('button_press_event', self.on_press)
         self.canvas.mpl_connect('motion_notify_event', self.on_motion)
@@ -445,6 +454,7 @@ class App:
         self.nb = nb
         self._tab_hardware(nb)
         self._tab_fans(nb)
+        self._tab_blocks(nb)
         self._tab_case(nb)
         self._tab_parts(nb)
         self._tab_results(nb)
@@ -469,6 +479,25 @@ class App:
         self.menu.add_separator()
         self.menu.add_command(label='Duplicate', command=self.dup_fan)
         self.menu.add_command(label='Delete fan', command=self.del_fan)
+        menu = dict(tearoff=0, bg=FIELD, fg=TXT, activebackground='#1d6fa5', activeforeground='white')
+        self.bmenu = tk.Menu(root, **menu)                 # right-click on a block
+        self.bmenu_kind = tk.Menu(self.bmenu, **menu)
+        self.bmenu_air = tk.Menu(self.bmenu, **menu)
+        self.v_bmenu_air = tk.StringVar()
+        for air, text in hw.BLOCK_AIR.items():
+            self.bmenu_air.add_radiobutton(label=text, value=air, variable=self.v_bmenu_air,
+                                           command=lambda a=air: self.set_block_air(a))
+        self.bmenu.add_command(label='Duplicate block', command=self.dup_block)
+        self.bmenu.add_command(label='Turn 90°', command=self.turn_block)
+        self.bmenu.add_cascade(label='Air through it', menu=self.bmenu_air)
+        self.bmenu.add_cascade(label='Kind', menu=self.bmenu_kind)
+        self.bmenu.add_separator()
+        self.bmenu.add_command(label='Delete block', command=self.del_block)
+        self.emenu = tk.Menu(root, **menu)                 # right-click on an empty spot
+        self.emenu_kind = tk.Menu(self.emenu, **menu)
+        self.emenu.add_command(label='Add a fan here', command=lambda: self.add_fan_at(*self._menu_xy))
+        self.emenu.add_cascade(label='Add a block here', menu=self.emenu_kind)
+        self._menu_xy = (0.0, 0.0)
 
         notes = list(notes) + list(getattr(self.cfg, 'notes', [])) + self._try(placement.resolve, self.cfg, default=[])
         self.load_widgets_from_cfg()
@@ -798,7 +827,7 @@ class App:
         ttk.Button(bt, text='+ Add fan', command=self.add_fan).pack(side='left')
         ttk.Button(bt, text='Duplicate', command=self.dup_fan).pack(side='left', padx=6)
         ttk.Button(bt, text='Remove', command=self.del_fan).pack(side='left')
-        ttk.Button(bt, text='Fix overlapping fans', command=self.fix_overlaps).pack(side='left', padx=(14, 0))
+        ttk.Button(bt, text='Fix overlaps', command=self.fix_overlaps).pack(side='left', padx=(14, 0))
 
         ed = ttk.Frame(f, style='Panel.TFrame', padding=12)
         ed.grid(row=2, column=0, columnspan=3, sticky='ew', pady=(4, 0))
@@ -904,6 +933,90 @@ class App:
                           'Position = centre of the fan in mm: front/rear = height above the floor, everything else = '
                           'distance from the rear wall. New, duplicated and moved fans always go to a free spot.',
                   style='Sub.TLabel', wraplength=540, justify='left').grid(row=6, column=0, columnspan=3, sticky='w', pady=(12, 0))
+
+    def _tab_blocks(self, nb):
+        f = self._scroll_tab(nb, 'Blocks')
+        f.columnconfigure(0, weight=1)
+        ttk.Label(f, text='Things you place yourself anywhere in the case: a block or a panel that stops the air, '
+                          'cables, a grille, or a part that makes heat (a pump, a capture card ...).',
+                  style='Sub.TLabel', wraplength=540, justify='left').grid(row=0, column=0, columnspan=3, sticky='w',
+                                                                           pady=(0, 6))
+        cols = ('n', 'kind', 'size', 'pos', 'air', 'heat', 'temp')
+        heads = ('#', 'Kind', 'Size', 'Centre', 'Air', 'Heat', 'Air at it')
+        widths = (30, 150, 76, 76, 58, 50, 66)
+        self.btree = ttk.Treeview(f, columns=cols, show='headings', height=7, selectmode='browse')
+        for c, hd, w in zip(cols, heads, widths):
+            self.btree.heading(c, text=hd)
+            self.btree.column(c, width=w, anchor='w' if c == 'kind' else 'center', stretch=(c == 'kind'))
+        self.btree.grid(row=1, column=0, columnspan=3, sticky='nsew')
+        self.btree.bind('<<TreeviewSelect>>', lambda e: self.on_select_block())
+        bt = ttk.Frame(f)
+        bt.grid(row=2, column=0, columnspan=3, sticky='w', pady=(6, 0))
+        self.v_bkind_new = tk.StringVar(value=hw.DEFAULT_BLOCK)
+        self.cb_bkind_new = ttk.Combobox(bt, textvariable=self.v_bkind_new, values=list(hw.BLOCKS), state='readonly',
+                                         width=28)
+        self.cb_bkind_new.pack(side='left')
+        ttk.Button(bt, text='+ Add block', command=self.add_block).pack(side='left', padx=6)
+        bt = ttk.Frame(f)
+        bt.grid(row=3, column=0, columnspan=3, sticky='w', pady=6)
+        ttk.Button(bt, text='Duplicate', command=self.dup_block).pack(side='left')
+        ttk.Button(bt, text='Remove', command=self.del_block).pack(side='left', padx=6)
+        ttk.Button(bt, text='Fix overlaps', command=self.fix_overlaps).pack(side='left', padx=(8, 0))
+
+        ed = ttk.Frame(f, style='Panel.TFrame', padding=12)
+        ed.grid(row=4, column=0, columnspan=3, sticky='ew', pady=(4, 0))
+        ed.columnconfigure(1, weight=1)
+        self.l_bedit = ttk.Label(ed, text='Selected block', style='Panel.TLabel', font=('Segoe UI', 11, 'bold'))
+        self.l_bedit.grid(row=0, column=0, columnspan=4, sticky='w')
+        self.v_bkind = tk.StringVar()
+        self.cb_bkind = ttk.Combobox(ed, textvariable=self.v_bkind, values=list(hw.BLOCKS), state='readonly')
+        self.cb_bkind.bind('<<ComboboxSelected>>', lambda e: self.on_block_kind())
+        ttk.Label(ed, text='Kind', style='Panel.TLabel').grid(row=1, column=0, sticky='w', pady=3)
+        self.cb_bkind.grid(row=1, column=1, columnspan=3, sticky='ew')
+        self.v_bx, self.v_by, self.v_bw, self.v_bh, self.v_bwatts = NumVar(), NumVar(), NumVar(), NumVar(), NumVar()
+        self.s_bx = ttk.Scale(ed, from_=0, to=450, variable=self.v_bx, command=lambda e: self.on_block_edit(slider=True))
+        self.s_bx.bind('<ButtonRelease-1>', lambda e: self.on_block_edit(snap=True))
+        self.s_by = ttk.Scale(ed, from_=0, to=450, variable=self.v_by, command=lambda e: self.on_block_edit(slider=True))
+        self.s_by.bind('<ButtonRelease-1>', lambda e: self.on_block_edit(snap=True))
+        for r, (lab, sc, var, unit) in enumerate((('From rear', self.s_bx, self.v_bx, 'mm (centre)'),
+                                                 ('Above floor', self.s_by, self.v_by, 'mm (centre)')), start=2):
+            ttk.Label(ed, text=lab, style='Panel.TLabel').grid(row=r, column=0, sticky='w', pady=3)
+            sc.grid(row=r, column=1, sticky='ew')
+            spinbox(ed, var, 0, 700, 5, lambda: self.on_block_edit(snap=True), width=6).grid(row=r, column=2, padx=6)
+            ttk.Label(ed, text=unit, style='PanelSub.TLabel').grid(row=r, column=3, sticky='w')
+        fr = ttk.Frame(ed, style='Panel.TFrame')
+        spinbox(fr, self.v_bw, hw.BLOCK_MIN_MM, hw.BLOCK_MAX_MM, 5, lambda: self.on_block_edit(snap=True),
+                width=6).pack(side='left')
+        ttk.Label(fr, text='×', style='Panel.TLabel').pack(side='left', padx=4)
+        spinbox(fr, self.v_bh, hw.BLOCK_MIN_MM, hw.BLOCK_MAX_MM, 5, lambda: self.on_block_edit(snap=True),
+                width=6).pack(side='left')
+        ttk.Label(fr, text='mm', style='PanelSub.TLabel').pack(side='left', padx=(6, 12))
+        ttk.Button(fr, text='Turn 90°', command=self.turn_block).pack(side='left')
+        ttk.Label(ed, text='Size', style='Panel.TLabel').grid(row=4, column=0, sticky='w', pady=3)
+        fr.grid(row=4, column=1, columnspan=3, sticky='w')
+        self.v_bair = tk.StringVar()
+        fr = ttk.Frame(ed, style='Panel.TFrame')
+        for air in hw.BLOCK_AIR:
+            ttk.Radiobutton(fr, text=AIR_SHORT[air], value=air, variable=self.v_bair, command=self.on_block_edit,
+                            style='Panel.TRadiobutton').pack(side='left', padx=(0, 10))
+        ttk.Label(ed, text='Air', style='Panel.TLabel').grid(row=5, column=0, sticky='w', pady=3)
+        fr.grid(row=5, column=1, columnspan=3, sticky='w')
+        fr = ttk.Frame(ed, style='Panel.TFrame')
+        spinbox(fr, self.v_bwatts, 0, hw.MAX_BLOCK_WATTS, 5, self.on_block_edit, width=6).pack(side='left')
+        ttk.Label(fr, text='W  (0 = no heat)', style='PanelSub.TLabel').pack(side='left', padx=(6, 0))
+        ttk.Label(ed, text='Heat', style='Panel.TLabel').grid(row=6, column=0, sticky='w', pady=3)
+        fr.grid(row=6, column=1, columnspan=3, sticky='w')
+        self.l_binfo = ttk.Label(ed, text='', style='PanelSub.TLabel', wraplength=440, justify='left')
+        self.l_binfo.grid(row=7, column=1, columnspan=3, sticky='w')
+        ttk.Label(f, text='Air: solid = no air gets through (it fills the case width, like a panel) · dense = air '
+                          'squeezes round it (a pump, a drive, a card) · cables = some air gets through · mesh = most '
+                          'air gets through.\n'
+                          'In the picture: drag a block to move it, drag the small triangle in its top-right corner to '
+                          'resize it, right-click it for more, or right-click an empty spot to add one there. Blocks '
+                          'never land on a fan or another part. Your own kinds of blocks: Parts tab → Blocks.',
+                  style='Sub.TLabel', wraplength=540, justify='left').grid(row=5, column=0, columnspan=3, sticky='w',
+                                                                           pady=(12, 0))
+        self._block_widgets(None)
 
     def _tab_case(self, nb):
         f = self._scroll_tab(nb, 'Case')
@@ -1066,6 +1179,13 @@ class App:
         if self.cfg.fans:
             k = self.sel if (keep_sel and self.sel is not None and self.sel < len(self.cfg.fans)) else 0
             self.select_fan(k)
+        self.refresh_btree()
+        if self.cfg.blocks:
+            k = self.bsel if (keep_sel and self.bsel is not None and self.bsel < len(self.cfg.blocks)) else 0
+            self.select_block(k)
+        else:
+            self.bsel = None
+            self._block_widgets(None)
         self.update_info()
 
     def _curve_widgets(self):
@@ -1248,12 +1368,13 @@ class App:
         self.l_power.configure(text=(
             'Now (%s): CPU %.0f W + GPU %.0f W + rest of the PC %.0f W = %.0f W\n'
             '   rest = board %.0f W (chipset %.0f + CPU power stage %.0f + %.0f) · RAM %.1f W · drives %.1f W · '
-            'fans %.1f W · USB %.0f W\n'
+            'fans %.1f W · USB %.0f W%s\n'
             'From the wall ≈ %.0f W · PSU %d W at %.0f %% load, %.0f %% efficient, %.0f W heat\n'
             'Maximum possible %.0f W → recommended PSU ≥ %d W · yours %d W (%s)\n'
             'Fan speeds: cooler %.0f %% = %.0f rpm · GPU %.0f %% = %.0f rpm · PSU %.0f %% = %.0f rpm' % (
                 c.load, ld['p_cpu'], ld['p_gpu'], ld['p_other'], ld['p_dc'], ld['p_board'], ld['p_chipset'],
                 ld['p_vrm'], hw.BOARD_MISC_W, ld['p_ram'], ld['p_storage'], ld['p_fans'], ld['p_usb'],
+                (' · your blocks %.0f W' % ld['p_blocks']) if ld['p_blocks'] else '',
                 ld['p_wall'], c.psu_watts, 100 * ld['psu_frac'], 100 * ld['eta'], ld['p_psu'], ld['p_dc_max'],
                 ld['psu_recommended'], c.psu_watts, ok, 100 * ld['f_cooler'], ld['f_cooler'] * cf['rpm'],
                 100 * ld['f_gpu'], ld['f_gpu'] * hw.GPU_FAN['rpm'], 100 * ld['f_psu'], ld['f_psu'] * hw.PSU_FAN['rpm'])))
@@ -1482,23 +1603,30 @@ class App:
         self.schedule_rebuild(100)
 
     def _resolve_after_change(self):
-        """new hardware (a drive cage, a longer GPU, a smaller case) may sit where a fan was: move that fan"""
+        """new hardware (a drive cage, a longer GPU, a smaller case) may sit where a fan or block was: move it"""
         moved = self._try(placement.resolve, self.cfg, default=[])
         if moved:
             self.refresh_tree()
             if self.sel is not None and self.sel < len(self.cfg.fans):
                 self.select_fan(self.sel)
+            self.refresh_btree()
+            if self.bsel is not None and self.bsel < len(self.cfg.blocks):
+                self.select_block(self.bsel)
             self.say(' · '.join(moved), seconds=12)
         return moved
 
     def fix_overlaps(self):
+        """fans and blocks that sit on something go to the nearest free spot"""
         notes = self._try(placement.resolve, self.cfg, default=[])
         if not notes:
-            self.say('No fan overlaps anything')
+            self.say('No fan or block overlaps anything')
             return
         self.refresh_tree()
         if self.sel is not None:
             self.select_fan(self.sel)
+        self.refresh_btree()
+        if self.bsel is not None and self.bsel < len(self.cfg.blocks):
+            self.select_block(self.bsel)
         self.schedule_rebuild(100)
         self.say(' · '.join(notes), seconds=12)
 
@@ -1536,7 +1664,7 @@ class App:
         for name in ('cpu', 'gpu', 'load', 'room_c', 'case', 'quality', 'psu_watts', 'psu_rating', 'psu_fan_mode',
                      'psu_fan_pct', 'gpu_fan_pct', 'cpu_power_w', 'gpu_power_w', 'gpu_length_mm', 'motherboard',
                      'ram_sticks', 'ram_type', 'ram_ecc', 'nvme_count', 'hdd_count', 'filter_condition', 'altitude_m',
-                     'fan_curve'):
+                     'fan_curve', 'blocks'):                  # your blocks stay in the case
             setattr(cfg, name, getattr(keep, name))
         preset_aio = hw.COOLERS[cfg.cooler]['kind'] == 'aio'
         if not preset_aio:                     # the ready-made fan layouts keep your own cooler
@@ -1552,6 +1680,184 @@ class App:
         self.rebuild(keep=True)
         if notes:
             self.say(' · '.join(notes), seconds=12)
+
+    # ================================================================ blocks tab
+    def refresh_btree(self):
+        sel = self.bsel
+        self.btree.delete(*self.btree.get_children())
+        for k, b in enumerate(self.cfg.blocks):
+            self.btree.insert('', 'end', iid='b%d' % k, values=(
+                k + 1, b.model, '%.0f × %.0f' % (b.w_mm, b.h_mm), '%.0f, %.0f' % (b.x_mm, b.y_mm),
+                AIR_SHORT.get(b.air, b.air), ('%.0f W' % b.watts) if b.watts else '-', ''))
+        if sel is not None and sel < len(self.cfg.blocks):
+            self.btree.selection_set('b%d' % sel)
+
+    def update_btree_live(self):
+        if self.summary is None:
+            return
+        air = {b['label']: b['t_air'] for b in self.summary.get('blocks', [])}
+        left_out = {r['index'] for r in self.view.L.draw.get('rejected_blocks', [])} if self.view is not None else set()
+        for k in range(len(self.cfg.blocks)):
+            iid = 'b%d' % k
+            if not self.btree.exists(iid):
+                continue
+            vals = list(self.btree.item(iid, 'values'))
+            t = air.get('Block %d' % (k + 1))
+            vals[6] = ('%.0f °C' % t) if t is not None else ('left out' if k in left_out else '')
+            self.btree.item(iid, values=vals)
+
+    def on_select_block(self):
+        s = self.btree.selection()
+        if s and int(s[0][1:]) != self.bsel:
+            self.select_block(int(s[0][1:]), from_tree=True)
+
+    def _block_widgets(self, b):
+        if b is None:
+            self.l_bedit.configure(text='No block selected - press "+ Add block", or right-click the picture')
+            self.l_binfo.configure(text='')
+            return
+        self.l_bedit.configure(text='Block %d' % (self.bsel + 1))
+        self.l_binfo.configure(text=hw.BLOCK_AIR.get(b.air, '') +
+                               ((' · gives %.0f W of heat to the air (counted in the power budget)' % b.watts)
+                                if b.watts else ''))
+
+    def select_block(self, k, from_tree=False):
+        if k is None or k >= len(self.cfg.blocks):
+            return
+        self.bsel = k
+        b = self.cfg.blocks[k]
+        cs = self.cfg.case
+        self._quiet = True
+        self.s_bx.configure(from_=b.w_mm / 2, to=max(b.w_mm / 2, cs.depth_mm - b.w_mm / 2))
+        self.s_by.configure(from_=b.h_mm / 2, to=max(b.h_mm / 2, cs.height_mm - b.h_mm / 2))
+        self.v_bkind.set(b.model)
+        self.v_bx.set(b.x_mm)
+        self.v_by.set(b.y_mm)
+        self.v_bw.set(b.w_mm)
+        self.v_bh.set(b.h_mm)
+        self.v_bair.set(b.air)
+        self.v_bwatts.set(b.watts)
+        self._quiet = False
+        self._block_widgets(b)
+        if not from_tree and self.btree.exists('b%d' % k):
+            self.btree.selection_set('b%d' % k)
+            self.btree.see('b%d' % k)
+
+    def _block_changed(self, k, note='', ms=60):
+        if note:
+            self.say(note)
+        self.refresh_btree()
+        self.select_block(k)
+        self.update_info()
+        self.schedule_rebuild(ms)
+
+    def _snap_block(self, k, before):
+        """after a move / resize / new kind: on a free spot, or back to how it was"""
+        ok, note = self._try(placement.snap_block, self.cfg, k, default=(False, 'Could not check the new spot'))
+        if not ok:
+            self.cfg.blocks[k] = before
+            note += ' - Block %d stays as it was' % (k + 1)
+        return note
+
+    def on_block_edit(self, slider=False, snap=False):
+        if self._quiet or self.bsel is None or self.bsel >= len(self.cfg.blocks):
+            return
+        k = self.bsel
+        b = self.cfg.blocks[k]
+        before = b.copy()
+        b.x_mm = round(self._num(self.v_bx, b.x_mm))
+        b.y_mm = round(self._num(self.v_by, b.y_mm))
+        b.w_mm = round(min(max(self._num(self.v_bw, b.w_mm), hw.BLOCK_MIN_MM), hw.BLOCK_MAX_MM), 1)
+        b.h_mm = round(min(max(self._num(self.v_bh, b.h_mm), hw.BLOCK_MIN_MM), hw.BLOCK_MAX_MM), 1)
+        if self.v_bair.get() in hw.BLOCK_AIR:
+            b.air = self.v_bair.get()
+        b.watts = min(max(self._num(self.v_bwatts, b.watts), 0.0), hw.MAX_BLOCK_WATTS)
+        note = ''
+        if snap or (not slider and (b.w_mm, b.h_mm) != (before.w_mm, before.h_mm)):
+            note = self._snap_block(k, before)
+        self._block_changed(k, note, 120 if slider else 60)
+
+    def on_block_kind(self):
+        if not self._quiet and self.v_bkind.get() in hw.BLOCKS:
+            self.set_block_kind(self.v_bkind.get())
+
+    def set_block_kind(self, kind):
+        """a block becomes another kind: that kind's size, air and heat, at the same place"""
+        k = self.bsel
+        if k is None or k >= len(self.cfg.blocks) or kind not in hw.BLOCKS:
+            return
+        b = self.cfg.blocks[k]
+        before = b.copy()
+        new = Block.of(kind, b.x_mm, b.y_mm)
+        b.model, b.w_mm, b.h_mm, b.air, b.watts = new.model, new.w_mm, new.h_mm, new.air, new.watts
+        note = self._snap_block(k, before) or 'Block %d is now: %s' % (k + 1, kind)
+        self._block_changed(k, note)
+
+    def set_block_air(self, air):
+        k = self.bsel
+        if k is None or k >= len(self.cfg.blocks) or air not in hw.BLOCK_AIR:
+            return
+        self.cfg.blocks[k].air = air
+        self._block_changed(k, 'Block %d: %s' % (k + 1, hw.BLOCK_AIR[air]))
+
+    def turn_block(self):
+        k = self.bsel
+        if k is None or k >= len(self.cfg.blocks):
+            return
+        b = self.cfg.blocks[k]
+        before = b.copy()
+        b.w_mm, b.h_mm = b.h_mm, b.w_mm
+        self._block_changed(k, self._snap_block(k, before) or 'Block %d turned: %.0f × %.0f mm' % (k + 1, b.w_mm, b.h_mm))
+
+    def add_block(self, kind=None, near=None):
+        kind = kind if kind in hw.BLOCKS else self.v_bkind_new.get()
+        if kind not in hw.BLOCKS:
+            kind = hw.DEFAULT_BLOCK
+        if len(self.cfg.blocks) >= MAX_BLOCKS:
+            self.say('A setup can have at most %d blocks' % MAX_BLOCKS)
+            return
+        cs = self.cfg.case
+        near = near if near is not None else (0.55 * cs.depth_mm, 0.6 * cs.height_mm)
+        b = Block.of(kind, *near)
+        ok, note = self._try(lambda: placement.place_new_block(self.cfg, b, near=near), default=(False, ''))
+        if not ok:
+            if note:
+                self.say(note)
+            return
+        self.cfg.blocks.append(b)
+        self.nb.select(TAB_BLOCKS)
+        self._block_changed(len(self.cfg.blocks) - 1, '%s: %s - drag it in the picture to move it' % (
+            kind, note[len('New block: '):] if note.startswith('New block: ') else note))
+
+    def dup_block(self):
+        k = self.bsel
+        if k is None or k >= len(self.cfg.blocks):
+            return
+        if len(self.cfg.blocks) >= MAX_BLOCKS:
+            self.say('A setup can have at most %d blocks' % MAX_BLOCKS)
+            return
+        twin = self.cfg.blocks[k].copy()
+        ok, note = self._try(lambda: placement.place_new_block(self.cfg, twin), default=(False, ''))
+        if not ok:
+            if note:
+                self.say(note)
+            return
+        self.cfg.blocks.append(twin)
+        self._block_changed(len(self.cfg.blocks) - 1, 'Copy of Block %d: %s' % (k + 1, placement.describe_block(twin)))
+
+    def del_block(self):
+        k = self.bsel
+        if k is None or k >= len(self.cfg.blocks):
+            return
+        del self.cfg.blocks[k]
+        self.bsel = min(k, len(self.cfg.blocks) - 1) if self.cfg.blocks else None
+        self.refresh_btree()
+        if self.bsel is not None:
+            self.select_block(self.bsel)
+        else:
+            self._block_widgets(None)
+        self.update_info()
+        self.schedule_rebuild(60)
 
     # ================================================================ parts tab
     def _pcat(self):
@@ -1729,6 +2035,10 @@ class App:
                     f.model = new
             if c.cooler_fan_model == old:
                 c.cooler_fan_model = new
+        elif cat == 'block':
+            for b in c.blocks:
+                if b.model == old:
+                    b.model = new
 
     def parts_delete(self):
         cat = self._pcat()
@@ -1789,6 +2099,9 @@ class App:
         elif cat == 'motherboard':
             c.motherboard = name
             what = 'the motherboard'
+        elif cat == 'block':
+            self.add_block(name)                     # a block is added to the case, at a free spot
+            return
         else:
             c.apply_case_preset(name)
             what = 'the case'
@@ -1820,10 +2133,13 @@ class App:
         self.cb_board.configure(values=list(hw.MOTHERBOARDS))
         self.cb_case.configure(values=list(hw.CASES))
         self.cb_model.configure(values=list(hw.ALL_FANS))
+        self.cb_bkind.configure(values=list(hw.BLOCKS))
+        self.cb_bkind_new.configure(values=list(hw.BLOCKS))
         self._quiet = True
         self._cooler_lists()
         self._quiet = False
         self.parts_refresh_list(select=select)
+        self.refresh_btree()
 
     # ================================================================ mouse on the picture
     def _fan_points(self, fan):
@@ -1858,23 +2174,73 @@ class App:
             return float(np.clip(x, s / 2, cs.depth_mm - s / 2)), fan.pos2_mm
         return float(np.clip(x, 13, cs.depth_mm - 13)), float(np.clip(y, 13, cs.height_mm - 13))
 
+    def _hit_block(self, x, y):
+        """(index, 'move' or 'resize') of the block under the mouse (as drawn), or None"""
+        if self.view is None:
+            return None
+        L, best = self.view.L, None
+        for b in L.draw.get('blocks', []) + L.draw.get('rejected_blocks', []):
+            if b['index'] >= len(self.cfg.blocks):
+                continue
+            x0, x1, y0, y1 = b['box']
+            g = max(HANDLE_MM, 6.0)
+            if x1 - g <= x <= x1 + 3 and y1 - g <= y <= y1 + 3:
+                return b['index'], 'resize'
+            t = 3.0 if min(x1 - x0, y1 - y0) < 10 else 0.0         # thin panels are easier to catch
+            if x0 - t <= x <= x1 + t and y0 - t <= y <= y1 + t:
+                area = (x1 - x0) * (y1 - y0)
+                if best is None or area < best[2]:
+                    best = (b['index'], 'move', area)
+        return None if best is None else best[:2]
+
+    def _under(self, x, y):
+        """the fan or the block under the mouse: (fan index or None, (block index, mode) or None)"""
+        k, hb = self._hit(x, y), self._hit_block(x, y)
+        if k is not None and hb is not None:                   # inside a block, a fan only wins right at its frame
+            near = min(math.hypot(x - fx, y - fy) for fx, fy in self._fan_points(self.cfg.fans[k]))
+            if near > 15.0:
+                k = None
+            else:
+                hb = None
+        return k, hb
+
+    def _popup(self, menu, ev):
+        try:
+            menu.tk_popup(int(ev.guiEvent.x_root), int(ev.guiEvent.y_root))
+        finally:
+            menu.grab_release()
+
+    def _kind_menu(self, menu, command):
+        menu.delete(0, 'end')
+        for kind in hw.BLOCKS:
+            menu.add_command(label=kind, command=lambda kd=kind: command(kd))
+
     def on_press(self, ev):
         if ev.inaxes is not self.ax or ev.xdata is None:
             return
-        k = self._hit(ev.xdata, ev.ydata)
+        k, hb = self._under(ev.xdata, ev.ydata)
         if ev.button == 3:
             if k is not None:
                 self.select_fan(k)
-                try:
-                    self.menu.tk_popup(int(ev.guiEvent.x_root), int(ev.guiEvent.y_root))
-                finally:
-                    self.menu.grab_release()
+                self._popup(self.menu, ev)
+            elif hb is not None:
+                self.select_block(hb[0])
+                self.v_bmenu_air.set(self.cfg.blocks[hb[0]].air)
+                self._kind_menu(self.bmenu_kind, self.set_block_kind)
+                self._popup(self.bmenu, ev)
+            else:
+                self._menu_xy = (ev.xdata, ev.ydata)
+                self._kind_menu(self.emenu_kind, lambda kd: self.add_block(kd, near=self._menu_xy))
+                self._popup(self.emenu, ev)
             return
         if ev.button != 1:
             return
         if ev.dblclick:
-            if k is None:
+            if k is None and hb is None:
                 self.add_fan_at(ev.xdata, ev.ydata)
+            return
+        if hb is not None and k is None:
+            self.start_block_drag(hb[0], hb[1], ev.xdata, ev.ydata)
             return
         if k is not None:
             self.select_fan(k)
@@ -1896,7 +2262,78 @@ class App:
         g.set_visible(True)
         self._marker()
 
+    # ---------------------------------------------------------------- blocks with the mouse
+    def start_block_drag(self, k, mode, x, y):
+        self.select_block(k)
+        self.nb.select(TAB_BLOCKS)
+        b = self.cfg.blocks[k]
+        self.bdrag = dict(index=k, mode=mode, start=b.copy(), moved=False, dx=x - b.x_mm, dy=y - b.y_mm,
+                          x0=b.x_mm - b.w_mm / 2, y0=b.y_mm - b.h_mm / 2,
+                          probe=self._try(lambda: placement.Probe(self.cfg, skip_blocks={k})))
+        self._show_ghost_box(b)
+
+    def _show_ghost_box(self, b, bad=False):
+        if self.view is None:
+            return
+        x0, x1, y0, y1 = b.box()
+        g = self.view.ghost_box
+        g.set_bounds(x0, y0, x1 - x0, y1 - y0)
+        g.set_edgecolor(BAD if bad else 'white')
+        g.set_visible(True)
+        self._marker()
+
+    def drag_block(self, x, y):
+        d = self.bdrag
+        k = d['index']
+        if k >= len(self.cfg.blocks):
+            return
+        b, cs = self.cfg.blocks[k], self.cfg.case
+        if d['mode'] == 'move':
+            b.x_mm = round(float(np.clip(x - d['dx'], b.w_mm / 2, max(b.w_mm / 2, cs.depth_mm - b.w_mm / 2))))
+            b.y_mm = round(float(np.clip(y - d['dy'], b.h_mm / 2, max(b.h_mm / 2, cs.height_mm - b.h_mm / 2))))
+        else:                                                  # the bottom-left corner stays where it is
+            b.w_mm = round(float(np.clip(x - d['x0'], hw.BLOCK_MIN_MM, max(hw.BLOCK_MIN_MM, cs.depth_mm - d['x0']))))
+            b.h_mm = round(float(np.clip(y - d['y0'], hw.BLOCK_MIN_MM, max(hw.BLOCK_MIN_MM, cs.height_mm - d['y0']))))
+            b.x_mm, b.y_mm = d['x0'] + b.w_mm / 2, d['y0'] + b.h_mm / 2
+        d['moved'] = True
+        self._quiet = True
+        for var, val in ((self.v_bx, b.x_mm), (self.v_by, b.y_mm), (self.v_bw, b.w_mm), (self.v_bh, b.h_mm)):
+            var.set(val)
+        self._quiet = False
+        why = d['probe'].why_block(b) if d['probe'] is not None else None
+        self._show_ghost_box(b, bad=bool(why))
+        self.status.configure(text='%s Block %d → %s%s' % (
+            'moving' if d['mode'] == 'move' else 'resizing', k + 1, placement.describe_block(b),
+            ('   ·   would sit on %s' % why) if why else ''))
+
+    def drop_block(self):
+        d, self.bdrag = self.bdrag, None
+        if self.view is not None:
+            self.view.ghost_box.set_visible(False)
+            self._marker()
+        k = d['index']
+        if not d['moved'] or k >= len(self.cfg.blocks):
+            return
+        b, probe = self.cfg.blocks[k], d['probe']
+        why = probe.why_block(b) if probe is not None else None
+        note = 'Block %d: %s' % (k + 1, placement.describe_block(b))
+        if why and d['mode'] == 'resize':
+            self.cfg.blocks[k] = d['start']
+            note = 'Block %d would sit on %s at that size - it keeps its size' % (k + 1, why)
+        elif why:
+            spot = probe.find_block(b, (b.x_mm, b.y_mm))
+            if spot:
+                b.x_mm, b.y_mm = spot
+                note = 'Block %d would sit on %s - moved beside it (%s)' % (k + 1, why, placement.describe_block(b))
+            else:
+                self.cfg.blocks[k] = d['start']
+                note = 'No free spot there for Block %d - it went back' % (k + 1)
+        self._block_changed(k, note, 30)
+
     def on_motion(self, ev):
+        if self.bdrag is not None and ev.xdata is not None:
+            self.drag_block(ev.xdata, ev.ydata)
+            return
         if self.drag is None or ev.xdata is None or self.drag >= len(self.cfg.fans):
             return
         fan = self.cfg.fans[self.drag]
@@ -1913,6 +2350,9 @@ class App:
             self.drag + 1, fan.wall, self._pos_text(fan), ('   ·   would sit on %s' % why) if why else ''))
 
     def on_release(self, ev):
+        if self.bdrag is not None:
+            self.drop_block()
+            return
         if self.drag is None:
             return
         k, moved, probe = self.drag, self.drag_moved, self.drag_probe
@@ -2013,8 +2453,8 @@ class App:
             self.summary = None
         self.settle_until = self.sim.t + (0.8 if keep else 1.5)
         w = layout.warnings
-        if any(r.get('why') != 'the radiator' for r in layout.draw['rejected']):
-            w = w + ['Press "Fix overlapping fans" in the Fans tab to move the fans marked ✕ to free spots']
+        if any(r.get('why') != 'the radiator' for r in layout.draw['rejected']) or layout.draw['rejected_blocks']:
+            w = w + ['Press "Fix overlaps" (Fans or Blocks tab) to move what is marked ✕ to a free spot']
         self.warn.configure(text=('⚠ ' + '\n⚠ '.join(w)) if w else '')
         self.view.update(self.k_anim, self.sim.interior_T(), self.sim.frame_particles(), self.summary)
         self._paint()
@@ -2054,6 +2494,7 @@ class App:
         if self.k % 8 == 0 and self.summary is not None:
             self.update_tiles()
             self.update_tree_live()
+            self.update_btree_live()
         if self.k % 40 == 0 and self.sim.disp is not None and self._results_shown():
             self.update_report()
 
@@ -2063,7 +2504,8 @@ class App:
         t_start = time.perf_counter()
         delay = 40
         try:
-            if self.running and self.sim is not None and self.view is not None and self.drag is None:
+            if (self.running and self.sim is not None and self.view is not None and self.drag is None
+                    and self.bdrag is None):
                 settling = self.sim.t < getattr(self, 'settle_until', 0.0)
                 gap = FRAME_GAP_SETTLING if settling else max(FRAME_GAP, self._frame_cost / FRAME_SHARE)
                 if t_start - self._last_frame >= gap:
@@ -2114,7 +2556,7 @@ class App:
         self.tile['heat'][0].configure(text=('%s %.0f %%' % sh[0]) if sh else '-')
         self.tile['heat'][1].configure(text='\n'.join('%s %.0f %%' % kv for kv in sh[1:3]) or ' ')
         self._flow_tiles()                           # wider numbers may need the two-row layout
-        if self.job is None and self.drag is None and time.time() > self._hold_until:
+        if self.job is None and self.drag is None and self.bdrag is None and time.time() > self._hold_until:
             settling = self.sim.t < getattr(self, 'settle_until', 0.0)
             self.status.configure(text='%ssimulated %.1f s  ·  %s detail' % (
                 'settling…  ' if settling else '', self.sim.t, self.cfg.quality))

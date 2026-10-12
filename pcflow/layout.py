@@ -35,8 +35,10 @@ K_GPU_FINS = 300.0
 K_BLOCK = 20000.0
 K_PSU = 60.0
 K_HDD = 2500.0               # a drive fills ~70 % of the case width: air squeezes round it
+BLOCK_K = {'dense': K_HDD, 'cables': 400.0, 'mesh': 60.0}     # blocks you place ('solid' = no air at all)
 H_FIN, H_RAD, H_PSU, H_BOARD = 45.0, 60.0, 30.0, 1.5   # heat-transfer rates (1/s)
 H_RAM, H_HDD = 6.0, 8.0
+H_BLOCK, H_BLOCK_EDGE = 8.0, 30.0                      # inside a block / in the air round a solid one
 HDD_PITCH, HDD_THICK, HDD_CAGE_W = 28.0, 26.0, 110.0
 DIMM_W = 4.5
 
@@ -71,10 +73,11 @@ def boxes_clash(a, b, tol=TOUCH):
 
 
 class Layout:
-    def __init__(self, cfg, h_mm=None, skip=()):
-        """skip = indexes of case fans to leave out (used to test where a fan could go)"""
+    def __init__(self, cfg, h_mm=None, skip=(), skip_blocks=()):
+        """skip / skip_blocks = indexes of case fans / blocks to leave out (used to test where one could go)"""
         self.cfg = cfg
         self.skip = set(skip)
+        self.skip_blocks = set(skip_blocks)
         self.h_mm = float(h_mm if h_mm else QUALITY_MM[cfg.quality])
         self.h = self.h_mm * 1e-3
         cs = cfg.case
@@ -98,7 +101,9 @@ class Layout:
         self.heat, self.fans, self.sides, self.openings = [], [], [], []
         self.parts = []              # (name, (x0, x1, y0, y1)) in the airflow plane, mm
         self.probes = {}
-        self.draw = {'wall_fans': [], 'side_fans': [], 'inside_fans': [], 'rejected': [], 'hdd': None}
+        self.draw = {'wall_fans': [], 'side_fans': [], 'inside_fans': [], 'rejected': [], 'hdd': None,
+                     'blocks': [], 'rejected_blocks': []}
+        self.block_probes = []       # (block index, cells of the air in / round it) for its temperature
         self.occupied = {'front': [], 'top': [], 'rear': [], 'bottom': []}
         self._heat_masks = []
         self._orphan_heat = 0.0
@@ -223,6 +228,27 @@ class Layout:
                 best, area = name, a
         return best
 
+    def free(self, boxes):
+        """for many boxes at once (n x 4: x0, x1, y0, y1): True where a box sits on nothing (as blocked_by)"""
+        boxes = np.asarray(boxes, float).reshape(-1, 4)
+        if not self.parts:
+            return np.ones(len(boxes), bool)
+        P = np.array([b for _, b in self.parts], float)
+        w = np.minimum(boxes[:, None, 1], P[None, :, 1]) - np.maximum(boxes[:, None, 0], P[None, :, 0])
+        h = np.minimum(boxes[:, None, 3], P[None, :, 3]) - np.maximum(boxes[:, None, 2], P[None, :, 2])
+        return ~((w > TOUCH) & (h > TOUCH)).any(axis=1)
+
+    def block_box(self, x, y, w, h):
+        """the box of a block centred (x, y), kept inside the case"""
+        w = float(min(max(w, hw.BLOCK_MIN_MM), self.D))
+        h = float(min(max(h, hw.BLOCK_MIN_MM), self.H))
+        cx = float(np.clip(x, w / 2, self.D - w / 2))
+        cy = float(np.clip(y, h / 2, self.H - h / 2))
+        return (cx - w / 2, cx + w / 2, cy - h / 2, cy + h / 2)
+
+    def why_block(self, x, y, w, h):
+        return self.blocked_by(self.block_box(x, y, w, h))
+
     def wall_slot(self, wall, p, s):
         """where a wall fan of size s centred p mm along the wall sits"""
         lo, hi = p - s / 2.0, p + s / 2.0
@@ -300,6 +326,7 @@ class Layout:
         self._build_storage()
         self._build_gpu()
         self._build_cooler()
+        self._build_blocks()             # before the RAM and the fans: they leave out what a block covers
         self._build_ram()
         for k, fan in enumerate(cfg.fans):
             if k not in self.skip:
@@ -704,6 +731,53 @@ class Layout:
         self.parts.append(('the radiator', box))
         self.cooler_top = sy + 30.0
 
+    def _build_blocks(self):
+        built = []
+        for k, b in enumerate(getattr(self.cfg, 'blocks', [])):
+            if k not in self.skip_blocks:
+                box = self._place_block(k, b)
+                if box is not None:
+                    built.append((k, b, box))
+        for k, b, box in built:              # heat once every block is in: a solid one may cover the air next to another
+            self._block_heat(k, b, box)
+
+    def _place_block(self, k, b):
+        label = 'Block %d' % (k + 1)
+        box = self.block_box(b.x_mm, b.y_mm, b.w_mm, b.h_mm)
+        if abs(0.5 * (box[0] + box[1]) - b.x_mm) > 0.5 or abs(0.5 * (box[2] + box[3]) - b.y_mm) > 0.5:
+            self.warnings.append('%s did not fit there - it is drawn (and simulated) inside the case' % label)
+        why = self.blocked_by(box)
+        if why:
+            self.draw['rejected_blocks'].append(dict(box=box, label=label, index=k, why=why))
+            self.warnings.append('%s overlaps %s - left out' % (label, why))
+            self._orphan_heat += float(b.watts)        # its heat still counts (like drives that do not fit)
+            return None
+        sl_ = self.cells(*box)
+        if b.air == 'solid':
+            self.ct[sl_] = SOLID
+        else:
+            K = BLOCK_K[b.air]
+            self.Kx[sl_] = np.maximum(self.Kx[sl_], K)
+            self.Ky[sl_] = np.maximum(self.Ky[sl_], K)
+        self.parts.append((label, box))
+        self.draw['blocks'].append(dict(box=box, label=label, model=b.model, air=b.air, watts=float(b.watts),
+                                        index=k))
+        return box
+
+    def _block_heat(self, k, b, box):
+        """a solid block warms the air round it, the others the air inside them"""
+        inside = self.mask(*box)
+        if b.air == 'solid':
+            g = self.h_mm
+            air = self.mask(box[0] - g, box[1] + g, box[2] - g, box[3] + g) & ~inside
+            H = H_BLOCK_EDGE
+        else:
+            air, H = inside, H_BLOCK
+        air &= self.ct == FLUID
+        if b.watts > 0:
+            self._add_heat('block %d' % (k + 1), air, H, b.watts)
+        self.block_probes.append((k, air))
+
     def _build_ram(self):
         """memory sticks stand out of the board next to the cooler: their heat goes into that air"""
         m = np.zeros((self.NY, self.NX), bool)
@@ -828,6 +902,8 @@ class Layout:
                 what = {'ram': 'The RAM sits under the CPU cooler', 'hdd': 'The hard drives are covered',
                         'gpu': 'The graphics card is covered', 'cpu': 'The CPU cooler is covered',
                         'psu': 'The PSU is covered'}.get(name, name)
+                if name.startswith('block '):
+                    what = 'There is no free air round %s' % name.capitalize()
                 self.warnings.append('%s - its %.0f W of heat is added to the board area instead' % (what, P))
             return
         self._heat_masks.append(m)
@@ -866,6 +942,7 @@ class Layout:
             hsrc['idx'] = np.nonzero(hsrc['mask'].ravel())[0]
         for sd in self.sides:
             sd['idx'] = np.nonzero(sd['mask'].ravel())[0]
+        self.block_probes = [(k, np.nonzero((m & (self.ct == FLUID)).ravel())[0]) for k, m in self.block_probes]
         moving = [f for f in self.fans if f.kind in ('case', 'aio') and f.wall != 'inside']
         self.n_in = sum(1 for f in moving if f.direction == 'in') + sum(1 for s in self.sides if s['direction'] == 'in')
         self.n_out = sum(1 for f in moving if f.direction == 'out') + \

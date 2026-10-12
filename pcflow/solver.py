@@ -15,6 +15,7 @@ import time
 import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
+from scipy.sparse.csgraph import connected_components
 
 from .layout import FLUID, SOLID, AMB, CFM
 from .thermal import fan_curve_frac, curve_temp
@@ -167,23 +168,38 @@ class Geometry:
         idx[fl] = np.arange(nfl)
         jj, ii = np.nonzero(fl)
         diag = np.zeros(nfl)
+        to_room = np.zeros(nfl, bool)                            # next to an opening
         rows, cols = [], []
         for dj, di in ((0, 1), (0, -1), (1, 0), (-1, 0)):
             nj, ni = jj + dj, ii + di
             nbt = ct[nj, ni]
             diag -= (nbt != SOLID)
+            to_room |= nbt == AMB
             m = nbt == FLUID
             rows.append(idx[jj[m], ii[m]])
             cols.append(idx[nj[m], ni[m]])
         rows = np.concatenate(rows)
         cols = np.concatenate(cols)
+        # air with no way out (a case without fans, a pocket closed in by blocks) has no pressure of its own and
+        # makes the matrix singular: one cell of each such pocket is tied to the room, like a small gap
+        links = sp.coo_matrix((np.ones(len(rows)), (rows, cols)), shape=(nfl, nfl))
+        n_comp, comp = connected_components(links, directed=False)
+        opened = np.zeros(n_comp, bool)
+        opened[comp[to_room]] = True
+        shut = np.flatnonzero(~opened)
+        self.sealed = []                                         # cells of air in each closed pocket
+        if len(shut):
+            order = np.argsort(comp, kind='stable')
+            diag[order[np.searchsorted(comp[order], shut)]] -= 1.0
+            self.sealed = [int(n) for n in np.bincount(comp, minlength=n_comp)[shut]]
+        self.n_air = nfl
         t0 = time.time()
-        A = sp.coo_matrix((np.ones(len(rows)), (rows, cols)), shape=(nfl, nfl)) + sp.diags(diag)
+        A = links + sp.diags(diag)
         self.lu = spla.splu(A.tocsc(), permc_spec='MMD_AT_PLUS_A')
         self.t_factor = time.time() - t0
         # solid cells next to air get the mean temperature of their air neighbours (smooth advection at walls)
         jj, ii = np.nonzero(~ns)
-        src, dst, w = [], [], []
+        src, dst = [], []
         count = np.zeros(len(jj))
         for dj, di in ((0, -1), (0, 1), (-1, 0), (1, 0)):
             nj, ni = jj + dj, ii + di
@@ -260,6 +276,16 @@ class Solver:
         self.geo = geo if (geo is not None and geo.same(ct)) else Geometry(ct)
         self.lu = self.geo.lu
         self.t_factor = time.time() - t0
+        sealed = self.geo.sealed
+        if sealed:
+            if max(sealed) > 0.5 * self.geo.n_air:
+                note = ('No fan or opening lets air in or out of the case - the air only moves round inside '
+                        '(simulated as if the case had a small gap)')
+            else:
+                note = ('%d pocket%s of air %s closed in by blocks or parts - that air cannot get out'
+                        % (len(sealed), '' if len(sealed) == 1 else 's', 'is' if len(sealed) == 1 else 'are'))
+            if note not in L.warnings:
+                L.warnings.append(note)
         self.phi = np.zeros((NY, NX))
         self.p_ema = np.zeros((NY, NX))
         self.src = np.zeros((NY, NX))

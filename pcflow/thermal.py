@@ -92,13 +92,14 @@ def compute_loads(cfg):
 
     p_fans = fans_power()
     p_usb = hw.USB_POWER[load]
-    p_other = p_board + p_ram + p_storage + p_fans + p_usb
+    p_blocks = sum(max(0.0, float(b.watts)) for b in getattr(cfg, 'blocks', []))     # parts you placed yourself
+    p_other = p_board + p_ram + p_storage + p_fans + p_usb + p_blocks
     p_dc = p_cpu + p_gpu + p_other
     cpu_top, gpu_top = max(cpu['max_w'], p_cpu), max(gpu['tbp'], p_gpu)     # own watts may be above the list
     p_dc_max = (cpu_top + gpu_top + mb['chipset_w'] + cpu_top * (1.0 / mb['vrm_eff'] - 1.0)
                 + hw.BOARD_MISC_W + cfg.ram_sticks * _ram_per_stick(cfg, 'max')
                 + cfg.nvme_count * hw.STORAGE_POWER['nvme']['max'] + cfg.hdd_count * hw.STORAGE_POWER['hdd']['max']
-                + fans_power(1.0, 1.0) + hw.USB_POWER['max'])
+                + fans_power(1.0, 1.0) + hw.USB_POWER['max'] + p_blocks)
     psu_frac = p_dc / cfg.psu_watts
     eta = psu_efficiency(cfg.psu_rating, psu_frac)
     p_wall = p_dc / eta
@@ -133,7 +134,7 @@ def compute_loads(cfg):
                 gpu_max=float(gpu['tbp']), f_gpu=f_gpu, f_cooler=f_cool, f_psu=f_psu, f_auto=f_auto,
                 p_board=float(p_board), p_vrm=float(p_vrm), p_chipset=float(p_chipset), p_ram=float(p_ram),
                 p_nvme=float(p_nvme), p_hdd=float(p_hdd), p_storage=float(p_storage), p_fans=float(p_fans),
-                p_usb=float(p_usb), rho_ratio=float(rho_ratio), warnings=warnings)
+                p_usb=float(p_usb), p_blocks=float(p_blocks), rho_ratio=float(rho_ratio), warnings=warnings)
 
 
 def estimate_temps(cfg, loads, cpu_air_in, gpu_air_in, cooler_ratio=None, gpu_ratio=None):

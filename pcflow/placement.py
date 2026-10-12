@@ -1,7 +1,7 @@
-"""Find a free spot for a fan, so a new or moved fan never lands on another fan or part.
+"""Find a free spot for a fan or a block, so a new or moved one never lands on another fan or part.
 
-The checks come from the layout itself (Layout.why_wall / why_inside / why_side), which works in
-millimetres, so a spot found here is free at every simulation detail level.
+The checks come from the layout itself (Layout.why_wall / why_inside / why_side / why_block), which
+works in millimetres, so a spot found here is free at every simulation detail level.
 """
 from typing import List, Optional, Tuple
 
@@ -12,6 +12,7 @@ from .layout import Layout, FAN_T
 PROBE_MM = 4.0                    # grid of the probe layout (the checks themselves are in mm)
 WALL_STEP = 2.5                   # search step along a wall (mm)
 AREA_STEP = 10.0                  # search step on the side panel / inside the case (mm)
+BLOCK_STEP = 5.0                  # search step for blocks (plus every spot right beside a part)
 WALL_ORDER = {'in': ('front', 'bottom', 'side', 'top', 'rear'),
               'out': ('top', 'rear', 'side', 'front', 'bottom')}
 WALL_NAMES = {'front': 'front panel', 'top': 'top', 'rear': 'rear', 'bottom': 'bottom', 'side': 'side panel',
@@ -19,11 +20,11 @@ WALL_NAMES = {'front': 'front panel', 'top': 'top', 'rear': 'rear', 'bottom': 'b
 
 
 class Probe:
-    """The case with some fans left out: answers 'what is in the way?' for a fan somewhere."""
+    """The case with some fans or blocks left out: answers 'what is in the way?' for one of them somewhere."""
 
-    def __init__(self, cfg, skip=(), h_mm: float = PROBE_MM):
+    def __init__(self, cfg, skip=(), h_mm: float = PROBE_MM, skip_blocks=()):
         self.cfg = cfg
-        self.L = Layout(cfg, h_mm, skip=skip)
+        self.L = Layout(cfg, h_mm, skip=skip, skip_blocks=skip_blocks)
 
     def why(self, fan, wall: Optional[str] = None, pos: Optional[float] = None,
             pos2: Optional[float] = None) -> Optional[str]:
@@ -37,6 +38,34 @@ class Probe:
         if wall == 'inside':
             return self.L.why_inside(s, fan.direction, pos, pos2)
         return self.L.why_wall(wall, pos, s)
+
+    def why_block(self, block, x: Optional[float] = None, y: Optional[float] = None,
+                  w: Optional[float] = None, h: Optional[float] = None) -> Optional[str]:
+        """None if the block fits there (with that size), else what it would sit on"""
+        return self.L.why_block(block.x_mm if x is None else x, block.y_mm if y is None else y,
+                                block.w_mm if w is None else w, block.h_mm if h is None else h)
+
+    def find_block(self, block, near=None) -> Optional[Tuple[float, float]]:
+        """the free centre for this block (same size) nearest to `near` (default: where it is now), or None"""
+        L = self.L
+        x0, x1, y0, y1 = L.block_box(block.x_mm, block.y_mm, block.w_mm, block.h_mm)
+        w, h = x1 - x0, y1 - y0
+        nx, ny = near if near is not None else (block.x_mm, block.y_mm)
+        nx, ny = float(np.clip(nx, w / 2, L.D - w / 2)), float(np.clip(ny, h / 2, L.H - h / 2))
+        edges = np.array([b for _, b in L.parts], float).reshape(-1, 4)
+        xs = np.concatenate([[nx], np.arange(w / 2, L.D - w / 2 + 1e-6, BLOCK_STEP), [L.D - w / 2],
+                             edges[:, 0] - w / 2, edges[:, 1] + w / 2])          # ... and right beside each part
+        ys = np.concatenate([[ny], np.arange(h / 2, L.H - h / 2 + 1e-6, BLOCK_STEP), [L.H - h / 2],
+                             edges[:, 2] - h / 2, edges[:, 3] + h / 2])
+        xs = np.unique(xs[(xs >= w / 2 - 1e-6) & (xs <= L.D - w / 2 + 1e-6)])
+        ys = np.unique(ys[(ys >= h / 2 - 1e-6) & (ys <= L.H - h / 2 + 1e-6)])
+        X, Y = [a.ravel() for a in np.meshgrid(xs, ys)]
+        ok = L.free(np.stack([X - w / 2, X + w / 2, Y - h / 2, Y + h / 2], axis=1))
+        if not ok.any():
+            return None
+        d = np.where(ok, np.hypot(X - nx, Y - ny), np.inf)
+        i = int(np.argmin(d))
+        return round(float(X[i]), 1), round(float(Y[i]), 1)
 
     # ------------------------------------------------------------------ search
     def natural_spot(self, wall, s):
@@ -182,12 +211,44 @@ def snap(cfg, index: int, near=None) -> Tuple[bool, str]:
     return True, 'Fan %d would sit on %s - moved beside it (%s)' % (index + 1, why, describe(fan))
 
 
+def describe_block(block) -> str:
+    return '%.0f × %.0f mm at %.0f, %.0f mm' % (block.w_mm, block.h_mm, block.x_mm, block.y_mm)
+
+
+def place_new_block(cfg, block, near=None) -> Tuple[bool, str]:
+    """Put a new block (not yet in cfg.blocks) on the free spot nearest to `near` (default: where it is).
+    Changes `block`; returns (ok, message for the user)."""
+    spot = Probe(cfg).find_block(block, near)
+    if spot is None:
+        return False, 'No room for a %.0f × %.0f mm block - every free spot is taken' % (block.w_mm, block.h_mm)
+    block.x_mm, block.y_mm = spot
+    return True, 'New block: %s' % describe_block(block)
+
+
+def snap_block(cfg, index: int, near=None) -> Tuple[bool, str]:
+    """A block in cfg.blocks was moved or resized: if it now sits on something, move it to the nearest free
+    spot.  Returns (ok, message)."""
+    block = cfg.blocks[index]
+    probe = Probe(cfg, skip_blocks={index})
+    x0, x1, y0, y1 = probe.L.block_box(block.x_mm, block.y_mm, block.w_mm, block.h_mm)
+    block.w_mm, block.h_mm = round(x1 - x0, 1), round(y1 - y0, 1)          # kept inside the case
+    block.x_mm, block.y_mm = round(0.5 * (x0 + x1), 1), round(0.5 * (y0 + y1), 1)
+    why = probe.why_block(block)
+    if why is None:
+        return True, ''
+    spot = probe.find_block(block, near)
+    if spot is None:
+        return False, 'There is no free spot for Block %d (%s is in the way)' % (index + 1, why)
+    block.x_mm, block.y_mm = spot
+    return True, 'Block %d would sit on %s - moved beside it (%s)' % (index + 1, why, describe_block(block))
+
+
 def resolve(cfg) -> List[str]:
-    """Move fans that overlap something (e.g. in an old setup file) to free spots.  Returns notes."""
+    """Move blocks and fans that overlap something (e.g. in an old setup file) to free spots.  Returns notes."""
+    notes = _resolve_blocks(cfg)
     L = Layout(cfg, PROBE_MM)
     # fans where the radiator sits are replaced by the radiator's own fans on purpose
     bad = [r['index'] for r in L.draw['rejected'] if r.get('index') is not None and r.get('why') != 'the radiator']
-    notes = []
     pending = set(bad)
     for k in sorted(bad):
         pending.discard(k)
@@ -201,4 +262,29 @@ def resolve(cfg) -> List[str]:
             continue
         apply_spot(fan, spot)
         notes.append('Fan %d overlapped %s - moved to the %s' % (k + 1, why, describe(fan)))
+    return notes
+
+
+def _resolve_blocks(cfg) -> List[str]:
+    L = Layout(cfg, PROBE_MM)
+    notes = []
+    for k, block in enumerate(cfg.blocks):            # a smaller case: what stuck out is moved inside (as drawn)
+        x0, x1, y0, y1 = L.block_box(block.x_mm, block.y_mm, block.w_mm, block.h_mm)
+        inside = (round(0.5 * (x0 + x1), 1), round(0.5 * (y0 + y1), 1), round(x1 - x0, 1), round(y1 - y0, 1))
+        if max(abs(a - b) for a, b in zip(inside, (block.x_mm, block.y_mm, block.w_mm, block.h_mm))) > 0.05:
+            block.x_mm, block.y_mm, block.w_mm, block.h_mm = inside
+            notes.append('Block %d stuck out of the case - moved inside (%s)' % (k + 1, describe_block(block)))
+    bad = sorted(r['index'] for r in L.draw['rejected_blocks'])
+    pending = set(bad)
+    for k in bad:
+        pending.discard(k)
+        block = cfg.blocks[k]
+        probe = Probe(cfg, skip_blocks=pending | {k})
+        why = probe.why_block(block) or 'another part'
+        spot = probe.find_block(block)
+        if spot is None:
+            notes.append('Block %d overlaps %s and there is no free spot for it - it is left out' % (k + 1, why))
+            continue
+        block.x_mm, block.y_mm = spot
+        notes.append('Block %d overlapped %s - moved to %s' % (k + 1, why, describe_block(block)))
     return notes

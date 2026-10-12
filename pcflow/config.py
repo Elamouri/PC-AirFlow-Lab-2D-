@@ -23,8 +23,9 @@ RAM_STICKS = (1, 2, 4)
 FAN_CURVE_SOURCES = ('hottest', 'cpu', 'gpu')
 DEFAULT_FAN_CURVE = dict(source='hottest', t_lo=50.0, pct_lo=30.0, t_hi=80.0, pct_hi=100.0)
 MAX_FANS = 40
+MAX_BLOCKS = 30
 MAX_FILE_BYTES = 5_000_000
-FILE_VERSION = 2
+FILE_VERSION = 3                  # 3: blocks
 
 
 @dataclass
@@ -77,6 +78,40 @@ class Fan:
 
 
 @dataclass
+class Block:
+    """Something you place yourself anywhere in the case: a block or divider that stops the air, cables, a
+    grille, or a part that makes heat (a pump, a capture card ...).  Seen through the glass, like the case.
+
+    model   a key of hardware.BLOCKS: the kind of block (its name is shown in the picture)
+    x_mm    centre, distance from the rear wall
+    y_mm    centre, height above the case floor
+    w_mm    width (front - rear) and h_mm height, in mm
+    air     solid | dense | cables | mesh: how much air gets through (hardware.BLOCK_AIR)
+    watts   heat it gives to the air, 0 = none (it also counts in the power budget)
+    """
+    model: str = hw.DEFAULT_BLOCK
+    x_mm: float = 220.0
+    y_mm: float = 200.0
+    w_mm: float = 80.0
+    h_mm: float = 80.0
+    air: str = 'solid'
+    watts: float = 0.0
+
+    @classmethod
+    def of(cls, model, x_mm=220.0, y_mm=200.0):
+        """a new block of a kind, with that kind's size, air and heat"""
+        spec = hw.BLOCKS[model]
+        return cls(model, x_mm, y_mm, spec['w'], spec['h'], spec['air'], spec['watts'])
+
+    def copy(self):
+        return Block(self.model, self.x_mm, self.y_mm, self.w_mm, self.h_mm, self.air, self.watts)
+
+    def box(self):
+        return (self.x_mm - self.w_mm / 2, self.x_mm + self.w_mm / 2, self.y_mm - self.h_mm / 2,
+                self.y_mm + self.h_mm / 2)
+
+
+@dataclass
 class Case:
     name: str = "Mid-tower 440 x 450 mm"
     depth_mm: float = 440.0          # rear wall -> front panel (inside)
@@ -122,6 +157,7 @@ class Config:
     filter_condition: str = "clean"   # clean | dusty | clogged dust filters
     altitude_m: float = 0.0           # height above sea level: thinner air carries less heat
     fan_curve: dict = field(default_factory=lambda: dict(DEFAULT_FAN_CURVE))   # for case fans set to auto
+    blocks: list = field(default_factory=list)       # Block: things you placed in the case yourself
 
     def __post_init__(self):
         self.notes = []               # what was fixed while reading a file (not saved)
@@ -157,7 +193,8 @@ class Config:
             raise ValueError('this is not a PC Airflow Lab setup')
         d = dict(d)                          # nested values are only read, never changed
         info = []
-        notes = library.register_embedded(d.pop('custom_parts', None), used=library.referenced_parts(d, MAX_FANS),
+        notes = library.register_embedded(d.pop('custom_parts', None),
+                                          used=library.referenced_parts(d, MAX_FANS, MAX_BLOCKS),
                                           info=info)
         version = d.pop('version', FILE_VERSION)
         if not isinstance(version, int) or isinstance(version, bool) or version > FILE_VERSION:
@@ -188,12 +225,14 @@ class Config:
                 rpm_of[id(fan)] = fd['rpm']
             fans.append(fan)
         _unknown_note(notes, 'Unknown fan settings ignored', odd)
+        blocks = _read_blocks(d.pop('blocks', []), notes)
         if isinstance(d.get('fan_curve'), dict):
             _unknown_note(notes, 'Unknown fan curve settings ignored',
                           [k for k in d['fan_curve'] if k not in DEFAULT_FAN_CURVE])
         rpms = {k: d.pop(k) for k in ('cooler_fan_rpm', 'gpu_fan_rpm', 'psu_fan_rpm') if k in d}
-        skip = ('case', 'fans')
-        cfg = cls(case=case, fans=fans, **{k: v for k, v in d.items() if k in cls.__dataclass_fields__ and k not in skip})
+        skip = ('case', 'fans', 'blocks')
+        cfg = cls(case=case, fans=fans, blocks=blocks,
+                  **{k: v for k, v in d.items() if k in cls.__dataclass_fields__ and k not in skip})
         notes += cfg.validate()
         for k, fan in enumerate(cfg.fans):
             if id(fan) in rpm_of:
@@ -361,7 +400,33 @@ class Config:
         if len(good) > MAX_FANS:
             notes.append('%d fans - only the first %d are used' % (len(good), MAX_FANS))
         self.fans = good[:MAX_FANS]
+        self._validate_blocks(notes, num, pick)
         return notes
+
+    def _validate_blocks(self, notes, num, pick):
+        good = []
+        blocks = self.blocks if isinstance(self.blocks, list) else []
+        if not isinstance(self.blocks, list):
+            notes.append('The block list is unreadable - no blocks loaded')
+        for k, b in enumerate(blocks):
+            tag = 'Block %d' % (k + 1)
+            if not isinstance(b, Block):
+                notes.append('%s is unreadable - removed' % tag)
+                continue
+            if not isinstance(b.model, str) or b.model not in hw.BLOCKS:
+                notes.append('%s kind "%s" is unknown, called "%s"' % (tag, library.printable(b.model, 60),
+                                                                      hw.DEFAULT_BLOCK))
+                b.model = hw.DEFAULT_BLOCK
+            b.air = pick(b.air, hw.BLOCK_AIR, 'solid', tag + ' air')
+            b.w_mm = num(b.w_mm, 80.0, hw.BLOCK_MIN_MM, hw.BLOCK_MAX_MM, tag + ' width')
+            b.h_mm = num(b.h_mm, 80.0, hw.BLOCK_MIN_MM, hw.BLOCK_MAX_MM, tag + ' height')
+            b.x_mm = num(b.x_mm, 220.0, 0, 1000, tag + ' position')
+            b.y_mm = num(b.y_mm, 200.0, 0, 1000, tag + ' height above the floor')
+            b.watts = num(b.watts, 0.0, 0, hw.MAX_BLOCK_WATTS, tag + ' heat')
+            good.append(b)
+        if len(good) > MAX_BLOCKS:
+            notes.append('%d blocks - only the first %d are used' % (len(good), MAX_BLOCKS))
+        self.blocks = good[:MAX_BLOCKS]
 
     def _validate_curve(self, notes, num, pick):
         c = self.fan_curve
@@ -396,6 +461,30 @@ def _unknown_note(notes, what, keys):
     keys = sorted(library.printable(k, 30) for k in keys)
     if keys:
         notes.append('%s: %s%s' % (what, ', '.join(keys[:8]), ' ...' if len(keys) > 8 else ''))
+
+
+def _read_blocks(raw, notes):
+    """Block objects from the "blocks" list of a setup file (checked later by Config.validate)"""
+    if not isinstance(raw, list):
+        notes.append('The block list is unreadable - no blocks loaded')
+        return []
+    if len(raw) > MAX_BLOCKS:
+        notes.append('%d blocks in the file - only the first %d are used' % (len(raw), MAX_BLOCKS))
+        raw = raw[:MAX_BLOCKS]
+    blocks, odd = [], set()
+    for k, bd in enumerate(raw):
+        if not isinstance(bd, dict):
+            notes.append('Block %d in the file is unreadable - skipped' % (k + 1))
+            continue
+        odd.update(kk for kk in bd if kk not in Block.__dataclass_fields__)
+        model = bd.get('model', hw.DEFAULT_BLOCK)
+        base = Block.of(model) if isinstance(model, str) and model in hw.BLOCKS else Block(model=model)
+        for kk, v in bd.items():                         # missing values come from its kind
+            if kk in Block.__dataclass_fields__:
+                setattr(base, kk, v)
+        blocks.append(base)
+    _unknown_note(notes, 'Unknown block settings ignored', odd)
+    return blocks
 
 
 def _rpm_to_pct(raw, max_rpm, label, notes):

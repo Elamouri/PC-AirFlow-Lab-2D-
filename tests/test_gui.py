@@ -364,3 +364,132 @@ def test_number_boxes_show_whole_numbers(app):
     assert app.root.globalgetvar(str(app.v_cpu_w)) in (0, '0')
     app.v_pos.set(132.5)
     assert app.sp_pos.get() == '132.5'                   # real decimals stay
+
+
+# ---------------------------------------------------------------- blocks
+def blocks_left_out(app):
+    app.rebuild(keep=False)
+    return app.view.L.draw['rejected_blocks']
+
+
+def test_add_block_button_puts_it_on_a_free_spot(app):
+    app.v_bkind_new.set('Pump + reservoir')
+    app.add_block()
+    app.add_block()
+    pump(app)
+    assert [b.model for b in app.cfg.blocks] == ['Pump + reservoir'] * 2
+    assert app.bsel == 1 and app.btree.selection() == ('b1',)
+    assert blocks_left_out(app) == [] and rejected(app) == []
+
+
+def test_drag_a_block_onto_the_gpu_snaps_beside_it(app):
+    app.add_block('Pump + reservoir')
+    app.rebuild(keep=False)
+    b = app.cfg.blocks[0]
+    g = app.view.L.draw['gpu']['box']
+    app.on_press(mouse(app, b.x_mm, b.y_mm))
+    assert app.bdrag is not None and app.bdrag['mode'] == 'move'
+    app.on_motion(mouse(app, 0.5 * (g[0] + g[1]), 0.5 * (g[2] + g[3])))
+    assert 'would sit on the GPU' in app.status.cget('text')
+    app.on_release(mouse(app, 0.5 * (g[0] + g[1]), 0.5 * (g[2] + g[3])))
+    pump(app)
+    assert app.bdrag is None and 'moved beside it' in app.status.cget('text')
+    assert blocks_left_out(app) == []
+
+
+def test_drag_the_corner_to_resize_a_block(app):
+    app.add_block('Block (no air through)')
+    app.rebuild(keep=False)
+    b = app.cfg.blocks[0]
+    x0, x1, y0, y1 = b.box()
+    app.on_press(mouse(app, x1 - 2, y1 - 2))
+    assert app.bdrag['mode'] == 'resize'
+    app.on_motion(mouse(app, x1 - 30, y1 + 10))
+    app.on_release(mouse(app, x1 - 30, y1 + 10))
+    b = app.cfg.blocks[0]
+    assert (b.w_mm, b.h_mm) == (pytest.approx(x1 - 30 - x0, abs=1), pytest.approx(y1 + 10 - y0, abs=1))
+    assert b.box()[0] == pytest.approx(x0, abs=0.6)               # the opposite corner stays put
+    app.rebuild(keep=True)                                        # (the mouse finds what is drawn)
+    x0, x1, y0, y1 = app.cfg.blocks[0].box()
+    app.on_press(mouse(app, x1 - 2, y1 - 2))
+    assert app.bdrag['mode'] == 'resize'
+    top = app.cfg.case.height_mm - 3
+    app.on_motion(mouse(app, x1 - 2, top))                        # up into the top fans: refused
+    app.on_release(mouse(app, x1 - 2, top))
+    assert 'keeps its size' in app.status.cget('text') and app.cfg.blocks[0].box() == (x0, x1, y0, y1)
+
+
+def test_right_click_an_empty_spot_adds_a_block_there(app):
+    app.on_press(mouse(app, 60, 380, button=3))
+    assert app._menu_xy == (60, 380)
+    app.emenu_kind.invoke(app.emenu_kind.index('Cable bundle'))
+    pump(app)
+    b = app.cfg.blocks[-1]
+    assert b.model == 'Cable bundle' and abs(b.x_mm - 60) < 40 and abs(b.y_mm - 380) < 60
+    assert blocks_left_out(app) == []
+
+
+def test_block_menu_turns_changes_and_deletes(app):
+    app.add_block('Capture / sound card')
+    app.rebuild(keep=False)
+    b = app.cfg.blocks[0]
+    app.on_press(mouse(app, b.x_mm, b.y_mm, button=3))
+    assert app.bsel == 0 and app.v_bmenu_air.get() == 'dense'
+    app.turn_block()
+    assert (app.cfg.blocks[0].w_mm, app.cfg.blocks[0].h_mm) == (20.0, 170.0)
+    app.set_block_air('mesh')
+    app.set_block_kind('Pump + reservoir')
+    assert app.cfg.blocks[0].model == 'Pump + reservoir' and app.cfg.blocks[0].air == 'dense'
+    app.del_block()
+    assert app.cfg.blocks == [] and app.bsel is None
+    assert blocks_left_out(app) == []
+
+
+def test_blocks_tab_editing_reaches_the_setup_and_the_power_budget(app):
+    app.add_block('Heat source')
+    app.v_bwatts.set(45)
+    app.on_block_edit()
+    assert app.cfg.blocks[0].watts == 45
+    assert 'your blocks 45 W' in app.l_power.cget('text')
+    app.v_bw.set('lots')
+    app.on_block_edit()
+    assert 'not a number' in app.status.cget('text') and app.cfg.blocks[0].w_mm == 60
+
+
+def test_own_block_kind_from_the_parts_tab(app):
+    app.parts_select_category('block')
+    app.parts_new()
+    app.part_name.set('My reservoir')
+    for key, val in dict(w='70', h='150', air='dense', watts='8').items():
+        app.part_vars[key].set(val)
+    assert app.parts_save()
+    assert 'My reservoir' in app.cb_bkind_new.cget('values')
+    iid = next(i for i, n in app._pnames.items() if n == 'My reservoir')
+    app.ptree.selection_set(iid)
+    app.parts_use()
+    assert app.cfg.blocks[-1].model == 'My reservoir' and app.cfg.blocks[-1].watts == 8
+    assert blocks_left_out(app) == []
+
+
+def test_fix_overlaps_moves_a_block_and_the_simulation_waits_while_dragging(app):
+    from pcflow.config import Block
+    g = app.view.L.draw['gpu']['box']
+    app.cfg.blocks = [Block.of('Pump + reservoir', 0.5 * (g[0] + g[1]), 0.5 * (g[2] + g[3]))]
+    assert blocks_left_out(app)
+    assert 'Fix overlaps' in app.warn.cget('text')
+    app.fix_overlaps()
+    assert blocks_left_out(app) == []
+    b = app.cfg.blocks[0]
+    app.on_press(mouse(app, b.x_mm, b.y_mm))
+    app.running = True
+    t = app.sim.t
+    app.tick()
+    assert app.sim.t == t                                         # no simulation while a block is held
+    app.on_release(mouse(app, b.x_mm, b.y_mm))
+    app.running = False
+
+
+def test_ready_made_fan_layouts_keep_your_blocks(app):
+    app.add_block('Pump + reservoir')
+    app.load_preset()
+    assert [b.model for b in app.cfg.blocks] == ['Pump + reservoir']
