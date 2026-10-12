@@ -309,3 +309,34 @@ def test_a_fan_added_inside_never_lands_on_a_block():
     assert ok, note
     cfg.fans.append(fan)
     nothing_left_out(cfg)
+
+
+def test_random_block_setups_never_break():
+    """any mix of blocks: no crash, finite numbers, no heat in a solid cell, every watt accounted for, and Fix
+    overlaps leaves nothing on top of anything (a second run changes nothing)"""
+    import random
+    from pcflow.config import PRESETS
+    rng = random.Random(7)
+    for _ in range(12):
+        cfg = rng.choice(list(PRESETS.values()))()
+        cfg.case.shroud = rng.random() > 0.3
+        cfg.blocks = []
+        for _ in range(rng.randint(1, 8)):
+            b = Block.of(rng.choice(list(hw.BLOCKS)), rng.uniform(-50, 500), rng.uniform(-50, 500))
+            if rng.random() < 0.5:
+                b.w_mm, b.h_mm = rng.uniform(2, 300), rng.uniform(2, 300)
+            b.air, b.watts = rng.choice(list(hw.BLOCK_AIR)), rng.choice([0, 5, 40, 150])
+            cfg.blocks.append(b)
+        cfg.validate()
+        L = Layout(cfg, 4.0)
+        assert all((L.ct[h['mask']] != SOLID).all() for h in L.heat)
+        ld = L.loads
+        assert sum(h['P'] for h in L.heat) == pytest.approx(ld['p_dc'] - ld['p_usb'] + ld['p_psu'])
+        sim = Solver(L, n_particles=20)
+        sim.run(0.2)
+        assert np.isfinite(sim.u).all() and np.isfinite(sim.v).all() and np.isfinite(sim.T).all()
+        text_report(sim)
+        notes = placement.resolve(cfg)
+        if not any('no free spot' in n for n in notes):
+            assert Layout(cfg, 4.0).draw['rejected_blocks'] == []
+            assert placement.resolve(cfg) == []

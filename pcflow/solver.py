@@ -28,7 +28,7 @@ AUTO_EVERY = 0.30      # s between auto-fan speed updates (like a fan header's s
 AUTO_STEP = 0.10       # largest speed change per update (0..1)
 REF_STEP = 0.7         # time step: 0.7 x cell / (1 m/s), the step the porous resistances were tuned with
 LIVE_STEP = 1.0        # the live view's longer step: the air moves 1.4x further per step, and the resistances
-                       # keep their tuned loss per second (Solver.damping); results stay within ~0.5 K / 2 %
+                       # keep their tuned loss per second (Solver.damping); results stay within ~1 K / 2 %
 REAL = np.float32      # flow and temperature fields
 
 

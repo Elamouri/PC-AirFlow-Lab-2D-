@@ -174,6 +174,27 @@ def test_exe_keeps_setups_in_documents(gui, monkeypatch, tmp_path):
     assert not os.path.exists(os.path.join(folder, 'positive_pressure.json'))
 
 
+def test_an_update_brings_only_its_new_examples(gui, monkeypatch, tmp_path):
+    """a setups folder made by 1.3 / 1.4 (no record of the examples): only the new examples are added"""
+    docs = tmp_path / 'Documents'
+    folder = docs / branding.APP_NAME
+    folder.mkdir(parents=True)
+    for name in gui.OLD_EXAMPLES:
+        if name != 'positive_pressure.json':                  # deleted long ago
+            (folder / name).write_text('{"old": true}', encoding='utf-8')
+    monkeypatch.setattr(gui, 'FROZEN', True)
+    monkeypatch.setattr(gui, 'BUNDLE', ROOT)
+    monkeypatch.setattr(gui, 'documents_dir', lambda: str(docs))
+    assert not os.path.exists(gui.offered_examples_path())
+    gui.setups_dir()
+    names = sorted(os.listdir(folder))
+    assert 'example_blocks.json' in names and 'positive_pressure.json' not in names
+    assert (folder / 'my_pc.json').read_text(encoding='utf-8') == '{"old": true}'
+    os.remove(folder / 'example_blocks.json')
+    gui.setups_dir()                                          # offered once: deleted stays deleted
+    assert 'example_blocks.json' not in os.listdir(folder)
+
+
 def test_source_keeps_setups_in_configs(gui, monkeypatch):
     monkeypatch.setattr(gui, 'FROZEN', False)
     assert gui.setups_dir() == os.path.join(gui.HERE, 'configs')

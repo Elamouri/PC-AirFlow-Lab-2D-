@@ -394,14 +394,14 @@ class CaseView:
         if hot:
             name += ' · %.0f W' % b['watts']
         size = 7.0 * fs
-        long = 5.2 * len(name) * fs + 6                                     # about how wide the name is (mm)
+        text_w = 5.2 * len(name) * fs + 6                                   # about how wide the name is (mm)
         dy = 6.0 if hot else 0.0
         cy = 0.5 * (y0 + y1)
-        if w >= long + 4 and h >= (30.0 if hot else 16.0):                  # room inside the block
+        if w >= text_w + 4 and h >= (30.0 if hot else 16.0):                  # room inside the block
             x, y, ha = 0.5 * (x0 + x1), cy, 'center'
-        elif x1 + long < L.D - 4:                                           # beside it, inside the case
+        elif x1 + text_w < L.D - 4:                                           # beside it, inside the case
             x, y, ha = x1 + 5, cy, 'left'
-        elif x0 - long > 4:
+        elif x0 - text_w > 4:
             x, y, ha = x0 - 5, cy, 'right'
         elif y1 + 28 < L.H:                                                 # above or below it
             x, y, ha = 0.5 * (x0 + x1), y1 + 8 + dy, 'center'

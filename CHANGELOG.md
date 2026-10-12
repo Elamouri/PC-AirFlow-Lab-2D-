@@ -2,6 +2,33 @@
 
 PC Airflow Lab - Powered by ElAmouri (https://github.com/Elamouri)
 
+## 1.5.0 - 2026-10-12
+
+**Less lag, and blocks: put your own parts anywhere in the case.**
+
+* The simulation is about 2.5 times faster in the live view. A step makes no new arrays any more (work arrays are
+  made once, the fields are 32-bit, all fans and heat sinks are handled at once, the pressure factorisation is kept
+  while the walls stay the same): 3.9 ms instead of 7.8 ms at normal detail, with the same answers. The live view
+  also takes a 1.4 times longer step; the porous resistances keep their tuned loss per second, so the results stay
+  within about 1 °C and 2 % airflow (command line, pictures and videos keep the shorter step). In the window the
+  simulation runs at about 0.45x real time instead of 0.17x, and the air settles after a change in about 1.5-3 s
+  instead of 4-7 s.
+* The controls stay smooth while the air moves: they are redrawn after every simulation slice (they used to wait up
+  to 3.5 s while the air settled). On Windows the loop no longer waits for a clock tick (~15 ms) between slices.
+  Pictures take at most 30 % of the time, the Results text is only made while its tab is open, and a moved fan or
+  block redraws in about 70 ms instead of about 105 ms.
+* Blocks (new Blocks tab): something that stops the air, a divider panel, a dense part, a cable bundle, a grille, a
+  pump with its reservoir, a capture card, a 2.5" SSD or a heat source. Drag them, resize them by their corner,
+  right-click for more, set how much air gets through (solid / dense / cables / mesh) and the heat they give off.
+  Their heat counts in the power budget and the PSU recommendation. Your own kinds of blocks can be saved in the
+  Parts tab and travel inside setups. New example: `configs/example_blocks.json`.
+* Blocks and fans never land on each other; **Fix overlaps** (was *Fix overlapping fans*) also moves blocks and
+  pulls them inside a smaller case. Ready-made fan layouts keep your blocks.
+* Air with no way out (a case without fans, a pocket closed in by blocks) made the pressure solver singular; such
+  air is now tied to the room like a small gap, and the app says so.
+* Setup files are version 3 (they have a `blocks` list); older files open as before.
+* Closing the window cancels the simulation loop's next turn (no more stray Tcl message).
+
 ## 1.4.0 - 2026-10-11
 
 **The live view is much quicker.**

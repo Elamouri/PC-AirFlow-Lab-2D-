@@ -11,6 +11,7 @@ Mouse on the picture:
   right-click a block   duplicate / turn 90° / how much air gets through / kind / delete
   right-click elsewhere add a fan or a block there
 """
+import json
 import logging
 import logging.handlers
 import math
@@ -36,6 +37,7 @@ import numpy as np
 from . import branding
 from . import hardware as hw
 from . import library, placement
+from .safejson import read_json
 from .config import (Config, Fan, Block, PRESETS, QUALITY_MM, PSU_FAN_MODES, COOLER_ORIENTATIONS, INSIDE_DIRS,
                      RAM_STICKS, FAN_CURVE_SOURCES, MAX_BLOCKS, my_pc)
 from .layout import Layout
@@ -63,7 +65,6 @@ FAN_COUNT_TEXT = {1: '1 fan (push)', 2: '2 fans (push-pull / front + middle)', 3
 CURVE_TEXT = {'hottest': 'the hottest of CPU / GPU', 'cpu': 'the CPU temperature', 'gpu': 'the GPU temperature'}
 TAB_FANS = 1
 TAB_BLOCKS = 2
-AIR_SHORT = {'solid': 'solid', 'dense': 'dense', 'cables': 'cables', 'mesh': 'mesh'}
 SIM_SLICE = 0.016                 # s of simulation per turn of the event loop - the window answers in between
 FRAME_GAP = 0.045                 # s between pictures (about 20 a second) ...
 FRAME_GAP_SETTLING = 0.20         # ... and 5 a second while the air settles after a change
@@ -103,21 +104,43 @@ def documents_dir():
     return os.path.join(os.path.expanduser('~'), 'Documents')
 
 
+OLD_EXAMPLES = ('aio_360_top.json', 'classic_2in_2out.json', 'example_extra_fans_push_pull.json', 'my_pc.json',
+                'positive_pressure.json')          # the example setups 1.3 and 1.4 put into the setups folder
+
+
+def offered_examples_path():
+    """which example setups were put into the setups folder already (kept next to my_parts.json)"""
+    return os.path.join(os.path.dirname(library.parts_path()), 'examples_offered.json')
+
+
 def setups_dir():
-    """where setups are opened / saved: the configs folder, or for the .exe Documents\\PC Airflow Lab
-    (the example setups are copied there the first time; your own files are never overwritten)"""
+    """where setups are opened / saved: the configs folder, or for the .exe Documents\\PC Airflow Lab.
+    Each example setup is copied there once (a new version may bring new ones); your own files are never
+    overwritten, and an example you deleted stays deleted."""
     if not FROZEN:
         return os.path.join(HERE, 'configs')
     folder = os.path.join(documents_dir(), branding.APP_NAME)
     try:
-        if os.path.isdir(folder):
-            return folder                    # examples only go into a new folder: deleted ones stay deleted
-        os.makedirs(folder)
         src = os.path.join(BUNDLE, 'configs')
-        for name in (os.listdir(src) if os.path.isdir(src) else []):
+        shipped = sorted(n for n in (os.listdir(src) if os.path.isdir(src) else []) if n.endswith('.json'))
+        record = offered_examples_path()
+        try:
+            offered = read_json(record, 100_000)
+            offered = {n for n in offered if isinstance(n, str)} if isinstance(offered, list) else None
+        except (OSError, ValueError):
+            offered = None
+        if offered is None:                  # first start, or a folder from 1.3 / 1.4 (they did not keep a record)
+            offered = set(OLD_EXAMPLES) if os.path.isdir(folder) else set()
+        os.makedirs(folder, exist_ok=True)
+        fresh = [n for n in shipped if n not in offered]
+        for name in fresh:
             dst = os.path.join(folder, name)
-            if name.endswith('.json') and not os.path.exists(dst):
+            if not os.path.exists(dst):
                 shutil.copy2(os.path.join(src, name), dst)
+        if fresh or not os.path.exists(record):
+            os.makedirs(os.path.dirname(record), exist_ok=True)
+            with open(record, 'w', encoding='utf-8') as fh:
+                json.dump(sorted(offered | set(shipped)), fh, indent=1)
     except OSError:
         log.warning('could not prepare the setups folder %s', folder, exc_info=True)
     return folder
@@ -346,6 +369,7 @@ class App:
         self._anim_t = 0.0
         self._last_frame = 0.0
         self._frame_cost = 0.0                 # how long a picture takes on this PC (s, smoothed)
+        self._tick_id = None                   # the next turn of the simulation loop
         self.live = None                       # quick drawing of the live view (render.LiveFrames)
         self.summary = None
         self._pending = None
@@ -504,7 +528,7 @@ class App:
         self.rebuild(keep=False)
         self._fit_controls()
         root.protocol('WM_DELETE_WINDOW', self.close)
-        root.after(50, self.tick)
+        self._tick_id = root.after(50, self.tick)
         if getattr(self.cfg, 'info', None):
             self.say(' · '.join(self.cfg.info), seconds=10)
         if notes:
@@ -997,7 +1021,7 @@ class App:
         self.v_bair = tk.StringVar()
         fr = ttk.Frame(ed, style='Panel.TFrame')
         for air in hw.BLOCK_AIR:
-            ttk.Radiobutton(fr, text=AIR_SHORT[air], value=air, variable=self.v_bair, command=self.on_block_edit,
+            ttk.Radiobutton(fr, text=air, value=air, variable=self.v_bair, command=self.on_block_edit,
                             style='Panel.TRadiobutton').pack(side='left', padx=(0, 10))
         ttk.Label(ed, text='Air', style='Panel.TLabel').grid(row=5, column=0, sticky='w', pady=3)
         fr.grid(row=5, column=1, columnspan=3, sticky='w')
@@ -1068,9 +1092,9 @@ class App:
         f = self._scroll_tab(nb, 'Parts')
         r = 0
         head(f, r, 'Your own parts', top=0); r += 1
-        ttk.Label(f, text='Add a fan, graphics card, processor, CPU cooler, motherboard or case that is not in the lists. '
-                          'The values are checked, saved on this PC, shown in every list of the app, and stored inside '
-                          'the setups that use them (so a setup opens on another PC too).',
+        ttk.Label(f, text='Add a fan, graphics card, processor, CPU cooler, motherboard, case or block that is not in the '
+                          'lists. The values are checked, saved on this PC, shown in every list of the app, and stored '
+                          'inside the setups that use them (so a setup opens on another PC too).',
                   style='Sub.TLabel', wraplength=540, justify='left').grid(row=r, column=0, columnspan=3, sticky='w',
                                                                            pady=(2, 8)); r += 1
         self.v_pcat = tk.StringVar(value=library.CATEGORIES['gpu'])
@@ -1688,7 +1712,7 @@ class App:
         for k, b in enumerate(self.cfg.blocks):
             self.btree.insert('', 'end', iid='b%d' % k, values=(
                 k + 1, b.model, '%.0f × %.0f' % (b.w_mm, b.h_mm), '%.0f, %.0f' % (b.x_mm, b.y_mm),
-                AIR_SHORT.get(b.air, b.air), ('%.0f W' % b.watts) if b.watts else '-', ''))
+                b.air, ('%.0f W' % b.watts) if b.watts else '-', ''))
         if sel is not None and sel < len(self.cfg.blocks):
             self.btree.selection_set('b%d' % sel)
 
@@ -2534,7 +2558,7 @@ class App:
                                                                              'the log')])
         # 0 = right after the clicks and key presses waiting now (any other delay waits for the next ~15 ms clock
         # tick on Windows); never after_idle: update_idletasks() would then run the simulation forever
-        self.root.after(delay, self.tick)
+        self._tick_id = self.root.after(delay, self.tick)
 
     def update_tiles(self):
         s = self.summary
@@ -2737,6 +2761,12 @@ class App:
             else:
                 log.warning('could not remove the unfinished export %s', part)
         self._remove_tmp()
+        for job in (self._tick_id, self._pending):   # nothing may run on the closed window
+            if job is not None:
+                try:
+                    self.root.after_cancel(job)
+                except tk.TclError:
+                    pass
         self.root.destroy()
 
 

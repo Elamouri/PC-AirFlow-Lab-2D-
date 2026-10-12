@@ -3,10 +3,12 @@
 The checks come from the layout itself (Layout.why_wall / why_inside / why_side / why_block), which
 works in millimetres, so a spot found here is free at every simulation detail level.
 """
+import math
 from typing import List, Optional, Tuple
 
 import numpy as np
 
+from . import hardware as hw
 from .layout import Layout, FAN_T
 
 PROBE_MM = 4.0                    # grid of the probe layout (the checks themselves are in mm)
@@ -211,6 +213,15 @@ def snap(cfg, index: int, near=None) -> Tuple[bool, str]:
     return True, 'Fan %d would sit on %s - moved beside it (%s)' % (index + 1, why, describe(fan))
 
 
+def _inside(L, block) -> Tuple[float, float, float, float]:
+    """the block's centre and size kept inside the case, to 0.1 mm (doing it twice changes nothing)"""
+    w = max(hw.BLOCK_MIN_MM, math.floor(min(block.w_mm, L.D) * 10 + 1e-6) / 10)
+    h = max(hw.BLOCK_MIN_MM, math.floor(min(block.h_mm, L.H) * 10 + 1e-6) / 10)
+    x = float(np.clip(round(block.x_mm, 1), w / 2, L.D - w / 2))
+    y = float(np.clip(round(block.y_mm, 1), h / 2, L.H - h / 2))
+    return x, y, w, h
+
+
 def describe_block(block) -> str:
     return '%.0f × %.0f mm at %.0f, %.0f mm' % (block.w_mm, block.h_mm, block.x_mm, block.y_mm)
 
@@ -230,9 +241,7 @@ def snap_block(cfg, index: int, near=None) -> Tuple[bool, str]:
     spot.  Returns (ok, message)."""
     block = cfg.blocks[index]
     probe = Probe(cfg, skip_blocks={index})
-    x0, x1, y0, y1 = probe.L.block_box(block.x_mm, block.y_mm, block.w_mm, block.h_mm)
-    block.w_mm, block.h_mm = round(x1 - x0, 1), round(y1 - y0, 1)          # kept inside the case
-    block.x_mm, block.y_mm = round(0.5 * (x0 + x1), 1), round(0.5 * (y0 + y1), 1)
+    block.x_mm, block.y_mm, block.w_mm, block.h_mm = _inside(probe.L, block)          # kept inside the case
     why = probe.why_block(block)
     if why is None:
         return True, ''
@@ -269,10 +278,10 @@ def _resolve_blocks(cfg) -> List[str]:
     L = Layout(cfg, PROBE_MM)
     notes = []
     for k, block in enumerate(cfg.blocks):            # a smaller case: what stuck out is moved inside (as drawn)
-        x0, x1, y0, y1 = L.block_box(block.x_mm, block.y_mm, block.w_mm, block.h_mm)
-        inside = (round(0.5 * (x0 + x1), 1), round(0.5 * (y0 + y1), 1), round(x1 - x0, 1), round(y1 - y0, 1))
-        if max(abs(a - b) for a, b in zip(inside, (block.x_mm, block.y_mm, block.w_mm, block.h_mm))) > 0.05:
-            block.x_mm, block.y_mm, block.w_mm, block.h_mm = inside
+        inside = _inside(L, block)
+        moved = max(abs(a - b) for a, b in zip(inside, (block.x_mm, block.y_mm, block.w_mm, block.h_mm))) > 0.051
+        block.x_mm, block.y_mm, block.w_mm, block.h_mm = inside
+        if moved:
             notes.append('Block %d stuck out of the case - moved inside (%s)' % (k + 1, describe_block(block)))
     bad = sorted(r['index'] for r in L.draw['rejected_blocks'])
     pending = set(bad)

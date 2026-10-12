@@ -152,3 +152,52 @@ automatic case-fan curve are simulated.
 - A speed change takes about 16 ms; a moved fan takes about 180 ms (new factorisation and drawing).
 - Tests: tests/test_speed.py (quick frame looks like a normal drawing and is under half its time, drawing key,
   factorisation reuse, fan blade shape, the window answers while running, drag marker, fallback to normal drawing).
+
+---
+
+# v1.5: less lag, and blocks you place yourself
+
+## Requirements
+- Reduce the lag that is left: the air moved in slow motion and took long to settle after a change, controls were
+  redrawn late while the air settled, and moving a fan redrew the view slowly.
+- Let people add parts the way they want, such as a block area: something that stops the air, cables, a grille, or a
+  part that makes heat, placed and sized anywhere in the case.
+
+## Measurements before (Linux, default window, "normal" detail)
+- A simulation step: 7.8 ms for 2.1 ms of air (0.27x real time): advection 3.8 ms (mostly making and freeing
+  temporary arrays), pressure solve 1.5 ms, diffusion 1.1 ms, fans / heat / wall fill / projection 1.4 ms.
+- In the window (real Tk main loop): 0.16-0.17x real time; while settling the loop used `after(0)`, so Tk's idle work
+  (redrawing controls) only ran inside the picture blits: controls waited 0.8 s on average and up to 3.5 s. On
+  Windows every other turn waited for the ~15 ms clock tick (`after(2)`).
+- A moved fan: ~105 ms (new factorisation 55, drawing 26, layers 50; `ax.clear()` alone 21 ms).
+
+## Steps
+1. Solver without temporary arrays: `Advection` works in arrays made once (shared by u, v and T), float32 fields,
+   fans and heat sinks in one go (`np.add.reduceat`), the wall temperature fill as a sparse map, flat index lists,
+   the pressure factorisation in a `Geometry` that the next solver reuses when the cells of air are the same.
+   Same operations in the same order: the fast advection equals the plain one exactly in float64.
+2. Longer live step (1.0 instead of 0.7 cell per (m/s)); `Solver.damping` keeps the tuned loss per second of every
+   porous part, which halved the step's effect on the results. Exports and the command line keep 0.7.
+3. Window loop: `after(0)` (never `after_idle`: `update_idletasks()` would then run the simulation forever),
+   `update_idletasks()` after each slice, pictures limited to 30 % of the time, the Results text only while its tab
+   is open, `clear_view` instead of `ax.clear()`, the background reused when the canvas did not change, flow dashes
+   with square ends.
+4. Blocks: `hardware.BLOCKS` (nine kinds), `config.Block` and `Config.blocks` (file version 3), `Layout` builds them
+   before the RAM and the fans (solid = no air, others porous; heat into or round them, after all blocks are in),
+   `placement` finds the nearest free spot (including right beside every part) and fixes overlaps, the power budget
+   counts their heat, `library` has a Blocks category, the view, the report and the exports show them, and the
+   window has a Blocks tab, mouse drag / resize and right-click menus.
+5. Air with no way out (no fans, a pocket closed in by blocks) made the pressure matrix singular: one cell of each
+   closed pocket is tied to the room (`scipy.sparse.csgraph`; `scipy.ndimage` is left out of the .exe).
+6. The .exe adds new example setups once (`examples_offered.json` next to `my_parts.json`).
+
+## Results
+- A step at normal detail: 3.9 ms (was 7.8), fast 2.5 ms (4.7), high 11.5 ms (19.5). The old and the new solver give
+  the same averages on five setups (CPU / GPU air within 0.1 K, airflow within 0.2 %); the live step moves CPU air by
+  +0.4 to +0.9 K and airflow by less than 2 %.
+- In the window: 0.40-0.47x real time (was 0.16-0.17x); controls wait 19 ms on average and 50 ms at most (were 0.8 s
+  and 3.5 s); a moved fan or block redraws in ~73 ms (was ~105 ms); a picture takes ~10 ms (was ~12 ms).
+- A randomised test of blocks (any kind, size, place, air and heat on every ready-made setup): no failure, no heat in a
+  solid cell, every watt accounted for, and *Fix overlaps* leaves nothing on top of anything in one run.
+- 290 pytest tests pass (54 new: blocks, solver equivalence, window loop, block mouse / tabs, example updates).
+
