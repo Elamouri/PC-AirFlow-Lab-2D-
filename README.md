@@ -57,7 +57,7 @@ You can also drag a setup file (`.json`) onto `PC_Airflow_Lab.exe` to open it. m
 * **Less lag: the air moves about 2.5 times faster in the live view.** A simulation step takes 3.9 ms instead of 7.8 ms with the same physics, and the live view takes a longer step. In the window the simulation now runs at about 0.45× real time instead of 0.17× (normal detail), so after a change the air settles in about 1.5–3 s instead of 4–7 s.
 * **The controls stay smooth while the air moves.** Buttons, sliders and numbers used to wait up to 3.5 s for a redraw while the air settled; now they wait at most about 50 ms. On Windows the simulation no longer pauses for a clock tick (about 15 ms) between its slices. Moving a fan or a block redraws in about 70 ms instead of about 105 ms.
 * **Blocks: put your own parts anywhere in the case.** A block that stops the air, a divider panel, a cable bundle, a grille, a pump with its reservoir, a capture card, a 2.5" SSD, or any part that makes heat. Drag them, resize them by their corner, set how much air gets through and how many watts they give off. Their heat counts in the power budget, and your own kinds of blocks can be saved in the Parts tab.
-* **Air with no way out is handled.** A case without fans, or a pocket of air closed in by blocks, used to give a wrong pressure; now that air is tied to the room like a small gap, and the app tells you.
+* **Air with no way out is handled.** In a case without fans the pressure had no fixed level (the solver relied on rounding). Now such air, and any pocket of air closed in by blocks, is tied to the room like a small gap, and the app tells you.
 
 Earlier versions are listed in [CHANGELOG.md](CHANGELOG.md).
 
