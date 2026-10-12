@@ -54,8 +54,8 @@ You can also drag a setup file (`.json`) onto `PC_Airflow_Lab.exe` to open it. m
 
 ## What's new in 1.5
 
-* **Less lag: the air moves about 2.5 times faster in the live view.** A simulation step takes 3.9 ms instead of 7.8 ms with the same physics, and the live view takes a longer step. In the window the simulation now runs at about 0.45× real time instead of 0.17× (normal detail), so after a change the air settles in about 1.5–3 s instead of 4–7 s.
-* **The controls stay smooth while the air moves.** Buttons, sliders and numbers used to wait up to 3.5 s for a redraw while the air settled; now they wait at most about 50 ms. On Windows the simulation no longer pauses for a clock tick (about 15 ms) between its slices. Moving a fan or a block redraws in about 70 ms instead of about 105 ms.
+* **Less lag: the air moves about twice as fast in the live view.** A simulation step takes 3.9 ms instead of 7.8 ms with the same physics, and the live view takes a slightly longer step. In the window the simulation now runs at about 0.35× real time instead of 0.18× (normal detail), and after a change the air settles in about 1.7 s instead of 4.2 s (3.4 s instead of 7.7 s after *Restart airflow*).
+* **The controls stay smooth while the air moves.** Buttons, sliders and numbers used to wait up to 4 s for a redraw while the air settled; now they wait about 20 ms, and at most about 60 ms. On Windows the simulation no longer pauses for a clock tick (about 15 ms) between its slices. Moving a fan or a block redraws in about 70 ms instead of about 105 ms.
 * **Blocks: put your own parts anywhere in the case.** A block that stops the air, a divider panel, a cable bundle, a grille, a pump with its reservoir, a capture card, a 2.5" SSD, or any part that makes heat. Drag them, resize them by their corner, set how much air gets through and how many watts they give off. Their heat counts in the power budget, and your own kinds of blocks can be saved in the Parts tab.
 * **Air with no way out is handled.** In a case without fans the pressure had no fixed level (the solver relied on rounding). Now such air, and any pocket of air closed in by blocks, is tied to the room like a small gap, and the app tells you.
 
@@ -269,7 +269,7 @@ On Linux, `tools/build_exe_wine.sh` does the same through Wine 11 or newer, with
 **Why the live view is quick.**
 
 * **The solver makes no new arrays while it runs.** Every work array is made once (the advection work is shared by the air speed and the temperature), the flow and temperature fields are 32-bit, all fans and all heat sinks are handled in one go, and what only depends on the walls (the pressure factorisation, index lists) is kept while they stay the same. A step at normal detail takes 3.9 ms instead of 7.8 ms and gives the same answers.
-* **The live view takes longer steps:** 1.0 × cell / (1 m/s) instead of 0.7. The porous resistances keep the loss per second they were tuned with, so the results stay within about 1 °C and 2 % airflow. The command line, pictures and videos keep the shorter step.
+* **The live view takes a slightly longer step:** 0.85 × cell / (1 m/s) instead of 0.7. The porous resistances keep the loss per second they were tuned with, so the results stay within about 0.5 °C and 1 % airflow (a step of 1.0 was tried too, but then the heat balance drifted). The command line, pictures and videos keep the shorter step.
 * **Drawing:** the case, the parts, the fan housings and the fixed labels are drawn once into see-through layers. Each frame then only paints the moving air, the spinning blades and the numbers, and pastes the layers in between, in the same stacking order as a normal drawing. Pictures never take more than 30 % of the time (on a slower PC there are a few less of them, and the air keeps its speed), and the Results text is only made while its tab is open.
 * **The window:** the simulation runs in slices of about 16 ms with the window answering in between, and changed controls are redrawn after every slice. The next slice is started with a zero delay, because Windows waits a whole clock tick (about 15 ms) for any other delay.
 
@@ -308,7 +308,7 @@ py -m pip install pytest
 py -m pytest -q
 ```
 
-290 tests cover:
+294 tests cover:
 
 * **fans, blocks and parts:** fans and blocks never overlap at any detail level; random mixes of blocks never break the simulation; the parts library; hostile setup files
 * **physics:** motherboard, RAM, drives, filters, altitude, fan curves and blocks; conservation checks; air with no way out

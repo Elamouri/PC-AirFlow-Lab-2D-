@@ -6,15 +6,15 @@ PC Airflow Lab - Powered by ElAmouri (https://github.com/Elamouri)
 
 **Less lag, and blocks: put your own parts anywhere in the case.**
 
-* The simulation is about 2.5 times faster in the live view. A step makes no new arrays any more (work arrays are
+* The simulation is about twice as fast in the live view. A step makes no new arrays any more (work arrays are
   made once, the fields are 32-bit, all fans and heat sinks are handled at once, the pressure factorisation is kept
   while the walls stay the same): 3.9 ms instead of 7.8 ms at normal detail, with the same answers. The live view
-  also takes a 1.4 times longer step; the porous resistances keep their tuned loss per second, so the results stay
-  within about 1 °C and 2 % airflow (command line, pictures and videos keep the shorter step). In the window the
-  simulation runs at about 0.45x real time instead of 0.17x, and the air settles after a change in about 1.5-3 s
-  instead of 4-7 s.
+  also takes a 1.2 times longer step; the porous resistances keep their tuned loss per second, so the results stay
+  within about 0.5 °C and 1 % airflow (command line, pictures and videos keep the shorter step). In the window the
+  simulation runs at about 0.35x real time instead of 0.18x, and the air settles after a change in about 1.7 s instead of 4.2 s
+  (3.4 s instead of 7.7 s after a restart).
 * The controls stay smooth while the air moves: they are redrawn after every simulation slice (they used to wait up
-  to 3.5 s while the air settled). On Windows the loop no longer waits for a clock tick (~15 ms) between slices.
+  to 4 s while the air settled). On Windows the loop no longer waits for a clock tick (~15 ms) between slices.
   Pictures take at most 30 % of the time, the Results text is only made while its tab is open, and a moved fan or
   block redraws in about 70 ms instead of about 105 ms.
 * Blocks (new Blocks tab): something that stops the air, a divider panel, a dense part, a cable bundle, a grille, a
